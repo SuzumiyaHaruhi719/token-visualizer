@@ -1,12 +1,12 @@
-/* Tray "current session" popover — dark, compact, rounded card on a
-   transparent, frameless, always-on-top window (~260x150). */
+/* Tray "current session" popover — acrylic glass + glow, matches the dashboard. */
 
 :root {
-  --pop-bg: #1b1b1bf2;
-  --pop-border: #ffffff14;
-  --pop-text: #ededed;
-  --pop-muted: #9a9a9a;
-  --pop-accent: #da7757;
+  --pop-text: #f3f4f8;
+  --pop-muted: #aab0c0;
+  --accent: #ff8a5c;
+  --teal: #54d2b4;
+  --blue: #8aa2e0;
+  --gold: #e8b06a;
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -33,94 +33,61 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: var(--pop-bg);
-  border: 1px solid var(--pop-border);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  gap: 8px;
+  padding: 13px 15px;
+  border-radius: 16px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04));
+  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  backdrop-filter: blur(30px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
   color: var(--pop-text);
 }
 
 /* Header: status dot + project, model on the right */
-.pop-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
+.pop-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pop-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--pop-muted);
-  flex: 0 0 auto;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--pop-muted); flex: 0 0 auto;
+  box-shadow: 0 0 9px 1px currentColor;
 }
-.pop-dot.k-working { background: #5bc0a8; }
-.pop-dot.k-thinking { background: #7c93c3; }
-.pop-dot.k-responding { background: var(--pop-accent); }
-.pop-dot.k-waiting { background: #e0a96d; }
-.pop-dot.k-idle { background: #6a6a6a; }
-.pop-dot.k-sleeping { background: #4a4a6a; }
+.pop-dot.k-working { background: var(--accent); color: var(--accent); }
+.pop-dot.k-thinking { background: var(--blue); color: var(--blue); }
+.pop-dot.k-responding { background: var(--teal); color: var(--teal); }
+.pop-dot.k-waiting { background: var(--gold); color: var(--gold); }
+.pop-dot.k-idle { background: #6e7484; color: #6e7484; }
+.pop-dot.k-sleeping { background: #5a5a72; color: #5a5a72; }
 
 .pop-project {
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1 1 auto;
-  min-width: 0;
+  font-size: 13.5px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1 1 auto; min-width: 0;
 }
-.pop-model {
-  font-size: 11px;
-  color: var(--pop-muted);
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
+.pop-model { font-size: 11px; color: var(--gold); white-space: nowrap; flex: 0 0 auto; }
 
 /* Metric grid: token / cache / cost */
 .pop-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-top: 2px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 2px;
 }
-.pop-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
+.pop-metric { display: flex; flex-direction: column; gap: 2px; }
 .pop-metric-value {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.1;
+  font-size: 16px; font-weight: 700; line-height: 1.05; letter-spacing: -0.3px;
+  background: linear-gradient(180deg, #ffffff, #cfd4e2);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .pop-metric-label {
-  font-size: 10px;
-  color: var(--pop-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 9.5px; color: var(--pop-muted);
+  text-transform: uppercase; letter-spacing: 0.06em;
 }
 
 /* "today's cost" footer line */
-.pop-foot {
-  margin-top: auto;
-  font-size: 11px;
-  color: var(--pop-muted);
-}
-.pop-foot strong {
-  color: var(--pop-text);
-  font-weight: 600;
-}
+.pop-foot { margin-top: auto; font-size: 11px; color: var(--pop-muted); }
+.pop-foot strong { color: var(--teal); font-weight: 650; }
 
 /* Empty state */
 .pop-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  font-size: 13px;
-  color: var(--pop-muted);
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; font-size: 13px; color: var(--pop-muted);
 }
