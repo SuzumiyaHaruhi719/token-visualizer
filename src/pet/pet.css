@@ -24,8 +24,10 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
-  padding: 8px;
+  gap: 6px;
+  /* Extra bottom padding so the project label clears the window edge (the pet
+     window is sized in src-tauri/src/windows.rs; height fits this stack). */
+  padding: 8px 8px 14px;
   cursor: pointer;
 }
 
@@ -114,17 +116,23 @@ body {
 @keyframes lookx { 0%, 100% { transform: translateX(-1.5px); } 50% { transform: translateX(1.5px); } }
 
 /* --- Per-state composition --------------------------------------------- */
+/*
+ * The whole-Clawd motion (bob / tilt / jitter / breathe + sleeping opacity) is
+ * driven from JS via requestAnimationFrame in pet-main.ts: the parent `.clawd`
+ * transform is set inline every frame. This both produces the motion AND forces
+ * the transparent, decoration-less WebView2 window to repaint each frame —
+ * pure-CSS keyframes on a transparent window freeze because Windows does not
+ * continuously composite it. The per-part animations below (eye blink, leg
+ * step, arm pump) stay as CSS: they now render because the parent repaints.
+ */
 
-/* idle: bob + blink */
-.state-idle .clawd { animation: bob 3.2s ease-in-out infinite; }
+/* idle: blink */
 .state-idle .p-eyes { animation: blink 4s infinite; }
 
-/* thinking: tilt + eyes nudged up (💭 added via bubble) */
-.state-thinking .clawd { animation: tilt 2.4s ease-in-out infinite; }
+/* thinking: eyes nudged up (💭 added via bubble) */
 .state-thinking .p-eyes { transform: translateY(-1.5px); }
 
-/* working: body jitter + staggered leg steps + arm pumps (tool tag added) */
-.state-working .clawd { animation: jit 0.3s steps(2) infinite; }
+/* working: staggered leg steps + arm pumps (tool tag added) */
 .state-working .p-leg1 { animation: step 0.4s ease-in-out infinite; }
 .state-working .p-leg2 { animation: step 0.4s ease-in-out infinite 0.1s; }
 .state-working .p-leg3 { animation: step 0.4s ease-in-out infinite 0.2s; }
@@ -132,14 +140,11 @@ body {
 .state-working .p-arml { animation: pump 0.4s ease-in-out infinite; }
 .state-working .p-armr { animation: pumpr 0.4s ease-in-out infinite; }
 
-/* responding: faster bob + faster blink (··· added) */
-.state-responding .clawd { animation: bob 1.3s ease-in-out infinite; }
+/* responding: faster blink (··· added; faster bob driven from JS) */
 .state-responding .p-eyes { animation: blink 1.6s infinite; }
 
-/* waiting: breathe + eyes look side-to-side (👀 added) */
-.state-waiting .clawd { animation: breathe 2.2s ease-in-out infinite; }
+/* waiting: eyes look side-to-side (👀 added; breathe driven from JS) */
 .state-waiting .p-eyes { animation: lookx 3s ease-in-out infinite; }
 
-/* sleeping: slow breathe, dimmed, eyes shut (💤 added) */
-.state-sleeping .clawd { animation: breathe 4.5s ease-in-out infinite; opacity: 0.72; }
+/* sleeping: eyes shut (💤 added; slow breathe + dim driven from JS) */
 .state-sleeping .p-eyes { transform: scaleY(0.12); }

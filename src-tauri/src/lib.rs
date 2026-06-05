@@ -115,6 +115,8 @@ pub fn run() {
 
             // --- desktop surface ---------------------------------------------
             windows::create_dashboard(&handle, port)?;
+            // Tray current-session popover: created hidden, toggled on tray click.
+            windows::create_popover(&handle, port)?;
             tray::build(&handle, port, pets_enabled.clone())?;
 
             Ok(())

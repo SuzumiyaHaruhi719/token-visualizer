@@ -6,7 +6,19 @@ import "../pet/pet.css";
 import { buildClawdSvg, stateToClass } from "./Clawd";
 import { subscribe } from "../lib/api";
 import { baseUrl } from "../lib/api";
-import type { PetState, SessionState, CmServerEvent } from "../lib/types";
+import type {
+  PetState,
+  PetStateKind,
+  SessionState,
+  CmServerEvent,
+} from "../lib/types";
+
+/**
+ * The current pet kind, read every animation frame by the rAF animator. Kept at
+ * module scope so `applyState` (driven by SSE) and the animation loop share it
+ * without re-wiring the loop on each state change.
+ */
+let currentKind: PetStateKind = "idle";
 
 /** Per-state speech bubble glyph (empty = no bubble). */
 const BUBBLE: Record<PetState["kind"], string> = {
@@ -61,6 +73,7 @@ const KNOWN_STATES = [
 ];
 
 function applyState(els: PetEls, session: SessionState): void {
+  currentKind = session.state.kind;
   const cls = stateToClass(session.state);
   els.stage.classList.remove(...KNOWN_STATES);
   els.stage.classList.add(cls);
@@ -97,31 +110,56 @@ async function openDashboard(): Promise<void> {
   }
 }
 
+/** Inline transform for the whole Clawd at time `t` (seconds) for a given kind. */
+function clawdTransform(kind: PetStateKind, t: number): string {
+  switch (kind) {
+    case "idle":
+      // gentle 0..-6 bob, period 3.2s
+      return `translateY(${-3 + 3 * Math.cos((2 * Math.PI * t) / 3.2)}px)`;
+    case "responding":
+      // same bob, faster period 1.3s
+      return `translateY(${-3 + 3 * Math.cos((2 * Math.PI * t) / 1.3)}px)`;
+    case "thinking":
+      return `rotate(${5 * Math.sin((2 * Math.PI * t) / 2.4)}deg)`;
+    case "working": {
+      // fast 2-step jitter
+      const x = Math.floor(t * 7) % 2 ? 1 : -1;
+      const y = Math.floor(t * 7 + 0.5) % 2 ? -1 : 0;
+      return `translate(${x}px, ${y}px)`;
+    }
+    case "waiting":
+      // breathe 1..1.06, period 2.2s
+      return `scaleY(${1 + 0.03 - 0.03 * Math.cos((2 * Math.PI * t) / 2.2)})`;
+    case "sleeping":
+      // slow breathe, period 4.5s
+      return `scaleY(${1 + 0.03 - 0.03 * Math.cos((2 * Math.PI * t) / 4.5)})`;
+  }
+}
+
 /**
- * Force the transparent WebView2 window to repaint every frame. Windows does not
- * continuously composite a transparent, decoration-less window, so pure-CSS
- * animations freeze until some input arrives. A rAF-driven sub-pixel nudge on a
- * tiny hidden element keeps the render pipeline ticking so the Clawd animates.
+ * Drive the whole-Clawd motion from JS. Setting `clawd.style.transform` every
+ * frame both animates the pet AND forces the transparent, decoration-less
+ * WebView2 window to repaint — pure-CSS keyframes on such a window freeze
+ * because Windows does not continuously composite it. The per-part CSS
+ * animations (eye blink, leg step, arm pump) then render too, since the parent
+ * repaints each frame.
  */
-function startRepaintPump(): void {
-  const pump = document.createElement("div");
-  pump.setAttribute("aria-hidden", "true");
-  pump.style.cssText =
-    "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.004;pointer-events:none;will-change:transform;";
-  document.body.appendChild(pump);
-  let n = 0;
-  const tick = (): void => {
-    n ^= 1;
-    pump.style.transform = `translateX(${n * 0.02}px)`;
-    requestAnimationFrame(tick);
+function startAnimator(clawd: SVGElement | null): void {
+  if (!clawd) return;
+  const start = performance.now();
+  const frame = (): void => {
+    const t = (performance.now() - start) / 1000;
+    clawd.style.transform = clawdTransform(currentKind, t);
+    clawd.style.opacity = currentKind === "sleeping" ? "0.72" : "1";
+    requestAnimationFrame(frame);
   };
-  requestAnimationFrame(tick);
+  requestAnimationFrame(frame);
 }
 
 function bootstrap(): void {
   const root = document.getElementById("pet") ?? document.body;
   const els = renderShell(root as HTMLElement);
-  startRepaintPump();
+  startAnimator(els.stage.querySelector<SVGElement>(".clawd"));
   const sessionId = getSessionId();
 
   // Initial placeholder state until the stream resolves our session.
