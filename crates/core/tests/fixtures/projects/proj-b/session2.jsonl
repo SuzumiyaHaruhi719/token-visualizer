@@ -1,0 +1,1 @@
+{"type":"assistant","cwd":"/home/u/ProjB","sessionId":"sb","requestId":"b_1","timestamp":"2026-06-06T09:00:00.000Z","message":{"model":"claude-sonnet-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":500,"output_tokens":60}}}

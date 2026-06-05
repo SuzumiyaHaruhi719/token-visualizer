@@ -1,0 +1,6 @@
+{"type":"user","message":{"content":"hi"}}
+{"type":"assistant","cwd":"C:\\Users\\Thomas\\Documents\\Projects\\ProjA","sessionId":"sa","requestId":"a_1","timestamp":"2026-06-05T10:00:00.000Z","message":{"model":"claude-opus-4-8","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash"}],"usage":{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1"}]}}
+{"type":"assistant","cwd":"C:\\Users\\Thomas\\Documents\\Projects\\ProjA","sessionId":"sa","requestId":"a_2","timestamp":"2026-06-05T10:01:00.000Z","message":{"model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":200,"output_tokens":40,"cache_creation_input_tokens":30,"cache_read_input_tokens":150}}}
+{this is a corrupt line that must be skipped}
+{"type":"summary"}
