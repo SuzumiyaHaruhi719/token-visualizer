@@ -60,6 +60,21 @@ pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri
             }
             ID_QUIT => app.exit(0),
             _ => {}
+        })
+        // LEFT-click (button release) toggles the current-session popover. The
+        // context menu still opens on RIGHT-click (`show_menu_on_left_click`
+        // stays false), so left vs. right are distinct gestures.
+        .on_tray_icon_event(move |tray, event| {
+            if matches!(
+                event,
+                tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                windows::toggle_popover(tray.app_handle(), port);
+            }
         });
 
     // Reuse the app's window icon for the tray when available.

@@ -14,15 +14,25 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 /// The dashboard window label.
 pub const DASHBOARD_LABEL: &str = "dashboard";
 
+/// The tray "current session" popover window label.
+pub const POPOVER_LABEL: &str = "popover";
+
 /// Prefix for per-session pet window labels (`pet-<sessionId>`).
 const PET_LABEL_PREFIX: &str = "pet-";
+
+/// Popover (tray current-session card) geometry.
+const POPOVER_W: f64 = 260.0;
+const POPOVER_H: f64 = 150.0;
+/// Gap kept between the popover and the screen's bottom-right corner (logical px).
+const POPOVER_MARGIN: f64 = 12.0;
 
 /// Soft cap on simultaneous pet windows (design §12.5).
 const MAX_PETS: usize = 8;
 
-/// Pet window geometry.
+/// Pet window geometry. Height fits bubble + Clawd stage + optional tool tag +
+/// project label without clipping (see `.pet-root` in `src/pet/pet.css`).
 const PET_W: f64 = 220.0;
-const PET_H: f64 = 200.0;
+const PET_H: f64 = 270.0;
 /// Cascade offsets between successive pet windows.
 const PET_DX: f64 = 60.0;
 const PET_DY: f64 = 40.0;
@@ -85,6 +95,80 @@ pub fn show_dashboard(app: &AppHandle, port: u16) {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+    }
+}
+
+/// Logical bottom-right anchor for the popover on the primary monitor, leaving
+/// [`POPOVER_MARGIN`] from the right and bottom edges (above the tray). Falls
+/// back to a sane default when no monitor info is available.
+fn popover_position(app: &AppHandle) -> (f64, f64) {
+    if let Ok(Some(mon)) = app.primary_monitor() {
+        let scale = mon.scale_factor();
+        let size = mon.size();
+        let pos = mon.position();
+        // Convert the monitor's physical geometry to logical px (the unit used by
+        // `WebviewWindowBuilder::position` / `inner_size`).
+        let mon_x = pos.x as f64 / scale;
+        let mon_y = pos.y as f64 / scale;
+        let mon_w = size.width as f64 / scale;
+        let mon_h = size.height as f64 / scale;
+        let x = mon_x + mon_w - POPOVER_W - POPOVER_MARGIN;
+        let y = mon_y + mon_h - POPOVER_H - POPOVER_MARGIN;
+        return (x.max(mon_x), y.max(mon_y));
+    }
+    (POPOVER_MARGIN, POPOVER_MARGIN)
+}
+
+/// Create the popover window **hidden** at startup (like the dashboard). It is a
+/// frameless, transparent, always-on-top, non-resizable card near the primary
+/// monitor's bottom-right; revealed/hidden by [`toggle_popover`] (tray click).
+pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
+    if app.get_webview_window(POPOVER_LABEL).is_some() {
+        return Ok(());
+    }
+    let (x, y) = popover_position(app);
+    WebviewWindowBuilder::new(
+        app,
+        POPOVER_LABEL,
+        WebviewUrl::External(server_url(port, "/popover.html")),
+    )
+    .title("Current Session")
+    .inner_size(POPOVER_W, POPOVER_H)
+    .position(x, y)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .visible(false) // tray-first: created hidden, shown on tray click
+    .focused(false)
+    .initialization_script(port_init_script(port))
+    .build()?;
+    Ok(())
+}
+
+/// Toggle the tray current-session popover: if it exists and is visible, hide
+/// it; otherwise (re)create it, reposition to the bottom-right, show + focus.
+/// Called from the tray's LEFT-click handler.
+pub fn toggle_popover(app: &AppHandle, port: u16) {
+    if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+            return;
+        }
+        // Re-anchor in case the display layout changed since creation.
+        let (x, y) = popover_position(app);
+        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    if create_popover(app, port).is_ok() {
+        if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
     }
 }
 
