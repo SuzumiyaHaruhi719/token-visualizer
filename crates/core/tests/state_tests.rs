@@ -54,6 +54,13 @@ fn busy_matched_tool_use_is_not_working() {
 }
 
 #[test]
+fn tool_result_before_tool_use_does_not_match_future_tool() {
+    let lines = vec![tool_result("tu_1"), tool_use("tu_1", "Bash")];
+    let st = derive_session_state("busy", &lines, 0, NOW, NOW);
+    assert_eq!(st, PetState::Working(Some("Bash".into())));
+}
+
+#[test]
 fn last_unmatched_tool_use_wins_when_multiple() {
     // First call completes; a second call (Edit) is still pending.
     let lines = vec![

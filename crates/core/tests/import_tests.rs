@@ -68,6 +68,36 @@ fn backfill_resumes_from_offset_on_append() {
 }
 
 #[test]
+fn backfill_rereads_from_zero_after_file_shrinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("projects").join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let file = proj.join("s.jsonl");
+
+    let line_a = r#"{"type":"assistant","cwd":"/x/P","sessionId":"s","requestId":"r1","timestamp":"2026-06-05T10:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":0}}}"#;
+    std::fs::write(&file, format!("{line_a}\n")).unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    backfill(&dir.path().join("projects"), &store, |_, _| {}).unwrap();
+    assert_eq!(store.event_count().unwrap(), 1);
+    let key = file.to_string_lossy().to_string();
+    let first_offset = store.get_offset(&key).unwrap();
+    assert!(first_offset > 0);
+
+    let line_b = r#"{"type":"assistant","cwd":"/x/P","sessionId":"s","requestId":"r2","timestamp":"2026-06-05T10:01:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":7,"output_tokens":0}}}"#;
+    std::fs::write(&file, format!("{line_b}\n")).unwrap();
+    assert!(std::fs::metadata(&file).unwrap().len() < first_offset);
+
+    backfill(&dir.path().join("projects"), &store, |_, _| {}).unwrap();
+    assert_eq!(store.event_count().unwrap(), 2);
+    assert_eq!(store.total_tokens().unwrap(), 107);
+    assert_eq!(
+        store.get_offset(&key).unwrap(),
+        std::fs::metadata(&file).unwrap().len()
+    );
+}
+
+#[test]
 fn backfill_does_not_advance_offset_past_half_written_line() {
     // A trailing line with no newline is "half-written"; the importer must not
     // consume it, so a later completion is still picked up.

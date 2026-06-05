@@ -85,7 +85,7 @@ pub fn process_file_update(path: &Path, store: &Store, tx: &Sender<WatchEvent>) 
             .events
             .iter()
             .cloned()
-            .map(|e| (e, offset as i64))
+            .map(|e| (e, read.start_offset as i64))
             .collect();
         store.insert_batch_at(&batch, &key)?;
     }
@@ -113,7 +113,13 @@ pub fn watch(projects_dir: &Path, store: Store, tx: Sender<WatchEvent>) -> Resul
     watcher.watch(projects_dir, RecursiveMode::Recursive)?;
 
     let join = std::thread::spawn(move || {
-        run_loop(raw_rx, stop_rx, &store, &tx);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_loop(raw_rx, stop_rx, &store, &tx);
+        }))
+        .is_err()
+        {
+            eprintln!("[watcher] loop panicked");
+        }
     });
 
     Ok(WatchHandle {

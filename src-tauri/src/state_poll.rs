@@ -46,19 +46,24 @@ pub fn run(state: AppState, app: AppHandle, port: u16) {
     let mut last_emitted: Vec<SessionState> = Vec::new();
 
     loop {
-        match poll_once(&state, &mut path_cache) {
-            Ok(sessions) => {
-                if sessions != last_emitted {
-                    last_emitted = sessions.clone();
-                    publish(&state, sessions.clone());
-                    drive_desktop(&app, port, sessions);
+        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match poll_once(&state, &mut path_cache) {
+                Ok(sessions) => {
+                    if sessions != last_emitted {
+                        last_emitted = sessions.clone();
+                        publish(&state, sessions.clone());
+                        drive_desktop(&app, port, sessions);
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal: log and keep polling. A transient FS error must
+                    // not kill live updates.
+                    eprintln!("[state-poll] {e:#}");
                 }
             }
-            Err(e) => {
-                // Non-fatal: log and keep polling. A transient FS error must
-                // not kill live updates.
-                eprintln!("[state-poll] {e:#}");
-            }
+        }));
+        if tick.is_err() {
+            eprintln!("[state-poll] tick panicked");
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -157,7 +162,12 @@ fn derive_from_status_files(
         let jsonl = find_session_jsonl(&session_id, path_cache);
         let (project, model, last_activity_ms, recent_lines) = match &jsonl {
             Some(p) => read_tail_signals(p, now_ms),
-            None => (project_fallback(&session_id), String::new(), st.updated_at, Vec::new()),
+            None => (
+                project_fallback(&session_id),
+                String::new(),
+                st.updated_at,
+                Vec::new(),
+            ),
         };
 
         // Prefer the heartbeat for last activity if it is fresher than the file.
@@ -229,7 +239,12 @@ fn read_tail_signals(path: &Path, fallback_ms: i64) -> (String, String, i64, Vec
         Ok(r) => r,
         Err(_) => {
             return (
-                project_fallback(&path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+                project_fallback(
+                    &path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                ),
                 String::new(),
                 fallback_ms,
                 Vec::new(),
@@ -360,5 +375,29 @@ mod tests {
     fn project_fallback_uses_short_id() {
         assert_eq!(project_fallback("0123456789abcdef"), "01234567");
         assert_eq!(project_fallback(""), "unknown");
+    }
+
+    #[test]
+    fn recent_jsonl_threshold_is_inclusive() {
+        let dir = tempfile_dir();
+        let file = dir.join("live.jsonl");
+        std::fs::write(&file, "").unwrap();
+        let mtime = file_mtime_ms(&file).unwrap();
+
+        let at_threshold = collect_recent_jsonl(&dir, mtime + ACTIVE_WINDOW_MS);
+        assert_eq!(at_threshold, vec![file.clone()]);
+
+        let past_threshold = collect_recent_jsonl(&dir, mtime + ACTIVE_WINDOW_MS + 1);
+        assert!(past_threshold.is_empty());
+    }
+
+    fn tempfile_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cm-state-poll-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

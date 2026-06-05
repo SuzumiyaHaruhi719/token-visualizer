@@ -52,6 +52,26 @@ fn incremental_read_picks_up_only_appended_bytes() {
 }
 
 #[test]
+fn process_file_update_handles_multiple_lines_in_one_burst() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("s.jsonl");
+    let second = ASSIST.replace("\"r1\"", "\"r2\"");
+    std::fs::write(&file, format!("{ASSIST}\n{second}\n")).unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    let (tx, rx) = mpsc::channel::<WatchEvent>();
+
+    process_file_update(&file, &store, &tx).unwrap();
+    assert_eq!(store.event_count().unwrap(), 2);
+    let WatchEvent::Events { events, .. } = rx.try_recv().unwrap();
+    assert_eq!(events.len(), 2);
+
+    process_file_update(&file, &store, &tx).unwrap();
+    assert_eq!(store.event_count().unwrap(), 2);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn watch_emits_event_when_file_appended() {
     let dir = tempfile::tempdir().unwrap();
     let projects = dir.path().to_path_buf();

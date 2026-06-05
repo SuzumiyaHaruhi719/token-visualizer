@@ -71,18 +71,14 @@ pub fn run() {
             // --- resolve the built frontend dir ------------------------------
             let resource_dir = app.path().resource_dir().ok();
             let dist_dir = server::resolve_dist_dir(resource_dir.as_deref()).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "could not locate the built frontend `dist/` (run `npm run build`)"
-                )
+                anyhow::anyhow!("could not locate the built frontend `dist/` (run `npm run build`)")
             })?;
 
             // --- bind + serve the axum server --------------------------------
             // Bind synchronously to learn the port; the serve loop is spawned
             // onto the async runtime inside `bind`.
-            let port = tauri::async_runtime::block_on(server::bind(
-                state.clone(),
-                dist_dir.clone(),
-            ))?;
+            let port =
+                tauri::async_runtime::block_on(server::bind(state.clone(), dist_dir.clone()))?;
             write_port_file(port);
 
             // --- backfill (own thread, own Store) ----------------------------
@@ -97,7 +93,15 @@ pub fn run() {
                 let app_for_poll = handle.clone();
                 std::thread::Builder::new()
                     .name("cm-state-poll".into())
-                    .spawn(move || state_poll::run(state, app_for_poll, port))
+                    .spawn(move || {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            state_poll::run(state, app_for_poll, port);
+                        }))
+                        .is_err()
+                        {
+                            eprintln!("[state-poll] thread panicked");
+                        }
+                    })
                     .expect("spawn state-poll thread");
             }
 
@@ -117,31 +121,37 @@ fn spawn_backfill(state: AppState) {
     std::thread::Builder::new()
         .name("cm-backfill".into())
         .spawn(move || {
-            let projects = match cmcore::paths::projects_dir() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[backfill] no projects dir: {e}");
-                    return;
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let projects = match cmcore::paths::projects_dir() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[backfill] no projects dir: {e}");
+                        return;
+                    }
+                };
+                let store = match Store::open(&state.db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[backfill] open store: {e}");
+                        return;
+                    }
+                };
+                let tx = state.tx.clone();
+                let import = state.import.clone();
+                let res = cmcore::importer::backfill(&projects, &store, |done, total| {
+                    {
+                        let mut g = import.blocking_write();
+                        *g = (done, total);
+                    }
+                    let _ = tx.send(SseEvent::Import { done, total });
+                });
+                if let Err(e) = res {
+                    eprintln!("[backfill] error: {e:#}");
                 }
-            };
-            let store = match Store::open(&state.db_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[backfill] open store: {e}");
-                    return;
-                }
-            };
-            let tx = state.tx.clone();
-            let import = state.import.clone();
-            let res = cmcore::importer::backfill(&projects, &store, |done, total| {
-                {
-                    let mut g = import.blocking_write();
-                    *g = (done, total);
-                }
-                let _ = tx.send(SseEvent::Import { done, total });
-            });
-            if let Err(e) = res {
-                eprintln!("[backfill] error: {e:#}");
+            }))
+            .is_err()
+            {
+                eprintln!("[backfill] thread panicked");
             }
         })
         .expect("spawn backfill thread");
@@ -181,7 +191,15 @@ fn spawn_watcher(state: AppState, db_path: PathBuf) {
     // Bridge thread: keep the WatchHandle alive + recompute `current` on events.
     std::thread::Builder::new()
         .name("cm-watch-bridge".into())
-        .spawn(move || run_watch_bridge(state, db_path, rx_watch, handle))
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_watch_bridge(state, db_path, rx_watch, handle);
+            }))
+            .is_err()
+            {
+                eprintln!("[watcher] bridge thread panicked");
+            }
+        })
         .expect("spawn watch-bridge thread");
 }
 

@@ -199,8 +199,9 @@ const SSE_EVENTS = ["usage", "sessions", "import"] as const;
 
 /**
  * Subscribe to the backend event stream. Calls onEvent for each typed event.
- * Returns an unsubscribe function. Falls back to a mock event driver when the
- * backend is unavailable (or mock mode is forced).
+ * Returns an unsubscribe function. Uses exponential reconnect for backend
+ * disconnects; mock mode is only used for standalone rendering or missing
+ * EventSource support.
  */
 export function subscribe(onEvent: (ev: CmServerEvent) => void): Unsubscribe {
   if (isMockForced() || typeof EventSource === "undefined") {
@@ -208,18 +209,43 @@ export function subscribe(onEvent: (ev: CmServerEvent) => void): Unsubscribe {
   }
 
   let es: EventSource | null = null;
-  let mockStop: Unsubscribe | null = null;
   let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelay = 1_000;
+  const maxReconnectDelay = 30_000;
 
-  const startMock = () => {
-    if (!mockStop && !closed) mockStop = mockEventDriver(onEvent);
+  const clearReconnect = () => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
   };
 
-  try {
-    es = new EventSource(apiUrl("/events"));
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) return;
+    es?.close();
+    es = null;
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  };
+
+  const connect = () => {
+    if (closed) return;
+    try {
+      es = new EventSource(apiUrl("/events"));
+    } catch {
+      scheduleReconnect();
+      return;
+    }
+    es.onopen = () => {
+      reconnectDelay = 1_000;
+    };
     es.onerror = () => {
-      // On connection failure, degrade to mock so the UI stays alive.
-      startMock();
+      scheduleReconnect();
     };
     for (const name of SSE_EVENTS) {
       es.addEventListener(name, (e) => {
@@ -231,14 +257,14 @@ export function subscribe(onEvent: (ev: CmServerEvent) => void): Unsubscribe {
         }
       });
     }
-  } catch {
-    startMock();
-  }
+  };
+
+  connect();
 
   return () => {
     closed = true;
+    clearReconnect();
     es?.close();
-    mockStop?.();
   };
 }
 

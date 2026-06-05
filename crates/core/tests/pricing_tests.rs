@@ -77,13 +77,29 @@ fn combined_cost_sums_components() {
 fn matches_by_model_name_prefix() {
     // Dated/suffixed model ids should still resolve via prefix.
     let t = PriceTable::seeded();
+    assert!(t.cost_usd(&Usage::default(), "claude-opus-4-7").is_some());
     assert!(t
         .cost_usd(&Usage::default(), "claude-opus-4-8-20260101")
         .is_some());
+    assert!(t.cost_usd(&Usage::default(), "claude-sonnet-4-6").is_some());
     assert!(t
-        .cost_usd(&Usage::default(), "claude-sonnet-4-5-20251001")
+        .cost_usd(&Usage::default(), "claude-haiku-4-5-20251001")
         .is_some());
-    assert!(t.cost_usd(&Usage::default(), "claude-haiku-4-5").is_some());
+}
+
+#[test]
+fn angle_bracket_pseudo_models_are_zero_cost() {
+    let t = PriceTable::seeded();
+    let u = Usage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_create: 1_000_000,
+        cache_read: 1_000_000,
+        ..Default::default()
+    };
+    assert_eq!(t.cost_usd(&u, "<synthetic>"), Some(0.0));
+    assert_eq!(t.cost_usd(&u, "<rollup>"), Some(0.0));
+    assert_eq!(t.rate("<synthetic>").unwrap().input, 0.0);
 }
 
 #[test]

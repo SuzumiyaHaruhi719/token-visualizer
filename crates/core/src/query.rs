@@ -1,8 +1,8 @@
 //! Dashboard aggregations: `events` rows -> [`Summary`] DTO.
 //!
 //! All grouping happens in SQL (`GROUP BY`) over the indexed `events` table.
-//! Cost is layered on in Rust via the seeded [`PriceTable`]; if ANY model in
-//! the range lacks a known price, the relevant `cost_usd` is `None`.
+//! Cost is layered on in Rust via the seeded [`PriceTable`]; total `cost_usd`
+//! sums priced models and is `None` only when no in-range model has a price.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -103,7 +103,8 @@ pub fn summary_with(
     let by_project = query_by_project(store, start)?;
     let timeseries = query_timeseries(store, start)?;
 
-    // Total cost = sum of per-model costs; None if any model is unknown.
+    // Total cost = sum of priced per-model costs. Unknown models remain `None`
+    // in `by_model`, but do not wipe out the total if other models are priced.
     let total_cost = fold_costs(by_model.iter().map(|m| m.cost_usd));
 
     let denom = input + cache_create + cache_read;
@@ -134,13 +135,20 @@ pub fn summary_with(
     })
 }
 
-/// Combine optional per-row costs: `Some(sum)` only if every row is `Some`.
+/// Combine optional per-row costs: sum priced rows, returning `None` only when
+/// no row had a price.
 fn fold_costs(costs: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     let mut total = 0.0;
-    for c in costs {
-        total += c?;
+    let mut priced = 0usize;
+    for c in costs.flatten() {
+        total += c;
+        priced += 1;
     }
-    Some(total)
+    if priced == 0 {
+        None
+    } else {
+        Some(total)
+    }
 }
 
 fn query_by_model(

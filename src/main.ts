@@ -10,6 +10,7 @@ import type {
   SessionState,
   RangeKey,
   CmServerEvent,
+  Totals,
 } from "./lib/types";
 
 const RANGES: { key: RangeKey; label: string }[] = [
@@ -124,6 +125,58 @@ function bucketLabel(iso: string, range: RangeKey): string {
     return d.toLocaleTimeString([], { hour: "2-digit" });
   }
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function finiteNullable(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeSummary(input: Summary | null | undefined, fallbackRange: RangeKey): Summary {
+  const raw = (input ?? {}) as Partial<Summary>;
+  const rawTotals = (raw.totals ?? {}) as Partial<Totals>;
+  const totals = {
+    input: finiteNumber(rawTotals.input),
+    output: finiteNumber(rawTotals.output),
+    cacheCreate: finiteNumber(rawTotals.cacheCreate),
+    cacheRead: finiteNumber(rawTotals.cacheRead),
+  };
+  const tokens =
+    finiteNullable(rawTotals.tokens) ??
+    totals.input + totals.output + totals.cacheCreate + totals.cacheRead;
+  const denom = totals.input + totals.cacheCreate + totals.cacheRead;
+
+  return {
+    range: typeof raw.range === "string" ? raw.range : fallbackRange,
+    totals: {
+      tokens,
+      ...totals,
+      costUsd: finiteNullable(rawTotals.costUsd),
+      cacheHitRate:
+        finiteNullable(rawTotals.cacheHitRate) ?? (denom > 0 ? totals.cacheRead / denom : 0),
+      messages: finiteNumber(rawTotals.messages),
+      sessions: finiteNumber(rawTotals.sessions),
+    },
+    byModel: (Array.isArray(raw.byModel) ? raw.byModel : []).map((m) => ({
+      model: typeof m?.model === "string" ? m.model : "unknown",
+      tokens: finiteNumber(m?.tokens),
+      costUsd: finiteNullable(m?.costUsd),
+    })),
+    byProject: (Array.isArray(raw.byProject) ? raw.byProject : []).map((p) => ({
+      project: typeof p?.project === "string" ? p.project : "unknown",
+      tokens: finiteNumber(p?.tokens),
+    })),
+    timeseries: (Array.isArray(raw.timeseries) ? raw.timeseries : []).map((b) => ({
+      bucket: typeof b?.bucket === "string" ? b.bucket : "",
+      input: finiteNumber(b?.input),
+      output: finiteNumber(b?.output),
+      cacheCreate: finiteNumber(b?.cacheCreate),
+      cacheRead: finiteNumber(b?.cacheRead),
+    })),
+  };
 }
 
 function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
@@ -288,7 +341,7 @@ function setActiveTab(range: RangeKey): void {
 async function loadRange(range: RangeKey): Promise<void> {
   currentRange = range;
   setActiveTab(range);
-  const summary = await getSummary(range);
+  const summary = normalizeSummary(await getSummary(range), range);
   renderKpis(summary);
   renderCachePanel(summary);
   if (charts) {
@@ -348,4 +401,4 @@ if (typeof document !== "undefined") {
   }
 }
 
-export { loadRange, handleEvent, renderCurrent, bootstrap };
+export { loadRange, handleEvent, renderCurrent, bootstrap, normalizeSummary };

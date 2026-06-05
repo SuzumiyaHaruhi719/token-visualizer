@@ -18,6 +18,9 @@ use crate::store::Store;
 
 /// Result of reading new complete lines from a file.
 pub struct IncrementalRead {
+    /// Byte offset where this read actually started. This differs from the
+    /// requested offset when a file has shrunk and must be re-read from zero.
+    pub start_offset: u64,
     /// Assistant events parsed from the newly-read complete lines.
     pub events: Vec<ParsedEvent>,
     /// All line kinds parsed (for live state derivation by the watcher).
@@ -44,11 +47,9 @@ pub fn backfill(
 
         if !read.events.is_empty() {
             // Record provenance (source_file, line_offset == start offset).
-            let batch: Vec<(ParsedEvent, i64)> = read
-                .events
-                .into_iter()
-                .map(|e| (e, offset as i64))
-                .collect();
+            let start_offset = read.start_offset as i64;
+            let batch: Vec<(ParsedEvent, i64)> =
+                read.events.into_iter().map(|e| (e, start_offset)).collect();
             store.insert_batch_at(&batch, &key)?;
         }
         store.set_offset(&key, read.new_offset)?;
@@ -77,19 +78,21 @@ fn collect_jsonl(dir: &Path) -> Vec<std::path::PathBuf> {
 pub fn read_new_complete_lines(path: &Path, offset: u64) -> Result<IncrementalRead> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
-    if offset >= len {
+    let start = if offset > len { 0 } else { offset };
+    if start == len {
         return Ok(IncrementalRead {
+            start_offset: start,
             events: Vec::new(),
             lines: Vec::new(),
-            new_offset: offset.min(len),
+            new_offset: start,
         });
     }
-    file.seek(SeekFrom::Start(offset))?;
+    file.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::new(file);
 
     let mut events = Vec::new();
     let mut lines = Vec::new();
-    let mut consumed = offset;
+    let mut consumed = start;
     let mut buf = Vec::new();
 
     loop {
@@ -113,6 +116,7 @@ pub fn read_new_complete_lines(path: &Path, offset: u64) -> Result<IncrementalRe
     }
 
     Ok(IncrementalRead {
+        start_offset: start,
         events,
         lines,
         new_offset: consumed,

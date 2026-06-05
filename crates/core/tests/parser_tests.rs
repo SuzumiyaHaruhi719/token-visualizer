@@ -131,6 +131,26 @@ fn half_written_line_is_other() {
 }
 
 #[test]
+fn malformed_and_odd_shapes_never_panic() {
+    let cases = [
+        "{",
+        "[",
+        r#"{"message":null}"#,
+        r#"{"message":{"usage":[]}}"#,
+        r#"{"message":{"usage":{"input_tokens":{}}}}"#,
+        r#"{"message":{"content":{}}}"#,
+        r#"{"message":{"content":[null,42,"text",{}]}}"#,
+        r#"{"timestamp":false,"message":{"usage":{"input_tokens":"nope"}}}"#,
+        r#"{"message":{"content":[{"type":"tool_use","id":42,"name":false}]}}"#,
+    ];
+
+    for line in cases {
+        let parsed = std::panic::catch_unwind(|| parse_line(line));
+        assert!(parsed.is_ok(), "parse_line panicked for {line}");
+    }
+}
+
+#[test]
 fn assistant_with_missing_usage_fields_defaults_to_zero() {
     let line = r#"{"type":"assistant","cwd":"/p/X","sessionId":"s","requestId":"r","timestamp":"2026-06-05T10:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":7}}}"#;
     match parse_line(line) {

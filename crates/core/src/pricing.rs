@@ -41,10 +41,10 @@ impl Rate {
     }
 }
 
-/// A table of model rates, resolved by exact id first then by name prefix.
+/// A table of model rates, resolved by pseudo-model, exact id, then name prefix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceTable {
-    /// Exact-id overrides (highest priority).
+    /// Exact-id overrides for real model ids.
     pub rates: HashMap<String, Rate>,
     /// Prefix rules: if a model id starts with `prefix`, use this `Rate`.
     /// Checked longest-prefix-first so more specific prefixes win.
@@ -65,10 +65,16 @@ impl PriceTable {
     // not code. Current seeds: Opus 4.x = $15 in / $75 out, Sonnet 4.x = $3 / $15,
     // Haiku 4.x = $1 / $5.
     pub fn seeded() -> Self {
+        let opus = Rate::new(15.0, 75.0);
+        let sonnet = Rate::new(3.0, 15.0);
+        let haiku = Rate::new(1.0, 5.0);
         let prefixes = vec![
-            ("claude-opus-4".to_string(), Rate::new(15.0, 75.0)),
-            ("claude-sonnet-4".to_string(), Rate::new(3.0, 15.0)),
-            ("claude-haiku-4".to_string(), Rate::new(1.0, 5.0)),
+            ("claude-opus-4-8".to_string(), opus),
+            ("claude-opus-4".to_string(), opus),
+            ("claude-sonnet-4-6".to_string(), sonnet),
+            ("claude-sonnet-4".to_string(), sonnet),
+            ("claude-haiku-4-5".to_string(), haiku),
+            ("claude-haiku-4".to_string(), haiku),
         ];
         Self {
             rates: HashMap::new(),
@@ -76,8 +82,12 @@ impl PriceTable {
         }
     }
 
-    /// Resolve the rate for a model id: exact match, then longest matching prefix.
+    /// Resolve the rate for a model id: pseudo-model, exact match, then longest
+    /// matching prefix.
     pub fn rate(&self, model: &str) -> Option<Rate> {
+        if is_pseudo_model(model) {
+            return Some(Rate::new(0.0, 0.0));
+        }
         if let Some(r) = self.rates.get(model) {
             return Some(*r);
         }
@@ -113,4 +123,9 @@ impl PriceTable {
     pub fn from_json(s: &str) -> Result<Self> {
         Ok(serde_json::from_str(s)?)
     }
+}
+
+fn is_pseudo_model(model: &str) -> bool {
+    let model = model.trim();
+    model.len() >= 2 && model.starts_with('<') && model.ends_with('>')
 }

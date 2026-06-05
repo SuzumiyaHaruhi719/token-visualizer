@@ -100,7 +100,7 @@ fn cost_is_some_when_all_models_known() {
 }
 
 #[test]
-fn cost_is_none_when_any_model_unknown() {
+fn cost_is_none_when_no_model_is_priced() {
     let s = Store::open_in_memory().unwrap();
     s.insert_event(&mk(
         "x",
@@ -115,6 +115,65 @@ fn cost_is_none_when_any_model_unknown() {
     .unwrap();
     let sum = summary(&s, "all").unwrap();
     assert!(sum.totals.cost_usd.is_none());
+}
+
+#[test]
+fn total_cost_sums_priced_models_and_skips_unknowns() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_event(&mk(
+        "known",
+        DAY1,
+        "claude-sonnet-4-6",
+        "ProjA",
+        Usage {
+            input: 1_000_000,
+            output: 0,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    s.insert_event(&mk(
+        "unknown",
+        DAY1,
+        "totally-unknown-model",
+        "ProjA",
+        Usage {
+            input: 1_000_000,
+            output: 0,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    let sum = summary(&s, "all").unwrap();
+    assert_eq!(sum.totals.cost_usd, Some(3.0));
+    let unknown = sum
+        .by_model
+        .iter()
+        .find(|m| m.model == "totally-unknown-model")
+        .unwrap();
+    assert!(unknown.cost_usd.is_none());
+}
+
+#[test]
+fn synthetic_model_counts_as_priced_zero_cost() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_event(&mk(
+        "synthetic",
+        DAY1,
+        "<synthetic>",
+        "ProjA",
+        Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    let sum = summary(&s, "all").unwrap();
+    assert_eq!(sum.totals.cost_usd, Some(0.0));
+    assert_eq!(sum.by_model[0].cost_usd, Some(0.0));
 }
 
 #[test]
@@ -165,7 +224,8 @@ fn empty_store_is_zeroed_not_error() {
     assert_eq!(sum.totals.messages, 0);
     assert_eq!(sum.totals.sessions, 0);
     assert_eq!(sum.totals.cache_hit_rate, 0.0);
-    // No models -> cost is Some(0.0) (vacuously all-known), and no rows.
+    // No models -> no priced models in scope, and no rows.
+    assert!(sum.totals.cost_usd.is_none());
     assert!(sum.by_model.is_empty());
     assert!(sum.timeseries.is_empty());
 }
