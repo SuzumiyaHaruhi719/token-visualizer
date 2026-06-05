@@ -36,8 +36,9 @@ const PET_Y0: f64 = 80.0;
 /// API through the injected `window.__CM_PORT__` (see [`port_init_script`]).
 fn server_url(port: u16, path: &str) -> tauri::Url {
     let base = if cfg!(debug_assertions) {
-        // Vite dev server (tauri.conf `devUrl` / `beforeDevCommand: npm run dev`).
-        "http://localhost:1420".to_string()
+        // Vite dev server on a NON-1420 port (1420 is Tauri's default and would
+        // collide with other local Tauri apps like CorePilot OSD).
+        "http://localhost:5847".to_string()
     } else {
         format!("http://127.0.0.1:{port}")
     };
