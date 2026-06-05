@@ -68,6 +68,7 @@ pub fn create_dashboard(app: &AppHandle, port: u16) -> tauri::Result<()> {
     .inner_size(1100.0, 720.0)
     .resizable(true)
     .visible(false) // tray-first: do not show on launch
+    .focused(false) // never grab foreground focus from whatever you're using
     .initialization_script(port_init_script(port))
     .build()?;
     Ok(())
