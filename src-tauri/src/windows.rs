@@ -82,11 +82,26 @@ pub fn show_dashboard(app: &AppHandle, port: u16) {
     }
 }
 
+/// Close every open pet window (labels prefixed with [`PET_LABEL_PREFIX`]).
+/// Used when desktop pets are toggled off.
+pub fn close_all_pets(app: &AppHandle) {
+    for (label, win) in app.webview_windows() {
+        if label.strip_prefix(PET_LABEL_PREFIX).is_some() {
+            let _ = win.close();
+        }
+    }
+}
+
 /// Reconcile pet windows against the current active-session list:
 /// spawn a window for each new session, close windows whose session vanished.
 ///
 /// Honors a soft cap of [`MAX_PETS`]; extra sessions are ignored (no spam).
-pub fn sync_pets(app: &AppHandle, port: u16, sessions: &[SessionState]) {
+/// When `pets_enabled` is false, all pet windows are closed and nothing spawns.
+pub fn sync_pets(app: &AppHandle, port: u16, sessions: &[SessionState], pets_enabled: bool) {
+    if !pets_enabled {
+        close_all_pets(app);
+        return;
+    }
     // Desired set of session ids (capped).
     let desired: Vec<&SessionState> = sessions.iter().take(MAX_PETS).collect();
     let desired_ids: HashSet<String> = desired.iter().map(|s| s.session_id.clone()).collect();

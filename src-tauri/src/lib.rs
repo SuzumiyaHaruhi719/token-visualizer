@@ -12,6 +12,7 @@
 //! All persistence (db, pricing, port file) lives under the app data dir.
 
 mod server;
+mod settings;
 mod state_poll;
 mod tray;
 mod windows;
@@ -68,6 +69,12 @@ pub fn run() {
             let prices = load_prices();
             let state = AppState::new(db_path.clone(), prices);
 
+            // Persisted on/off toggle for desktop pets, shared with the
+            // state-poll loop (reader) and the tray menu (writer).
+            let pets_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                settings::load().pets_enabled,
+            ));
+
             // --- resolve the built frontend dir ------------------------------
             let resource_dir = app.path().resource_dir().ok();
             let dist_dir = server::resolve_dist_dir(resource_dir.as_deref()).ok_or_else(|| {
@@ -91,11 +98,12 @@ pub fn run() {
             {
                 let state = state.clone();
                 let app_for_poll = handle.clone();
+                let pets_enabled_for_poll = pets_enabled.clone();
                 std::thread::Builder::new()
                     .name("cm-state-poll".into())
                     .spawn(move || {
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            state_poll::run(state, app_for_poll, port);
+                            state_poll::run(state, app_for_poll, port, pets_enabled_for_poll);
                         }))
                         .is_err()
                         {
@@ -107,7 +115,7 @@ pub fn run() {
 
             // --- desktop surface ---------------------------------------------
             windows::create_dashboard(&handle, port)?;
-            tray::build(&handle, port)?;
+            tray::build(&handle, port, pets_enabled.clone())?;
 
             Ok(())
         })

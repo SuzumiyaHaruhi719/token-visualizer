@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cmcore::importer::read_new_complete_lines;
@@ -39,20 +41,25 @@ const ACTIVE_WINDOW_MS: i64 = 5 * 60 * 1000;
 ///
 /// `app` drives the desktop side effects (pet windows + tray tooltip), executed
 /// on the main thread. The broadcast + shared state are updated regardless.
-pub fn run(state: AppState, app: AppHandle, port: u16) {
+pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) {
     // Cache of session_id -> jsonl path so we don't re-walk the whole tree
     // every second. Paths are stable once discovered.
     let mut path_cache: HashMap<String, PathBuf> = HashMap::new();
     let mut last_emitted: Vec<SessionState> = Vec::new();
+    let mut last_enabled = pets_enabled.load(Ordering::Relaxed);
 
     loop {
+        let enabled = pets_enabled.load(Ordering::Relaxed);
+        let enabled_changed = enabled != last_enabled;
+        last_enabled = enabled;
+
         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match poll_once(&state, &mut path_cache) {
                 Ok(sessions) => {
-                    if sessions != last_emitted {
+                    if sessions != last_emitted || enabled_changed {
                         last_emitted = sessions.clone();
                         publish(&state, sessions.clone());
-                        drive_desktop(&app, port, sessions);
+                        drive_desktop(&app, port, sessions, enabled);
                     }
                 }
                 Err(e) => {
@@ -71,11 +78,11 @@ pub fn run(state: AppState, app: AppHandle, port: u16) {
 
 /// Reconcile pet windows + tray tooltip on the main thread (window ops must not
 /// run off the UI thread on Windows).
-fn drive_desktop(app: &AppHandle, port: u16, sessions: Vec<SessionState>) {
+fn drive_desktop(app: &AppHandle, port: u16, sessions: Vec<SessionState>, pets_enabled: bool) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         let current = sessions.first().cloned();
-        windows::sync_pets(&app, port, &sessions);
+        windows::sync_pets(&app, port, &sessions, pets_enabled);
         tray::update_tooltip(&app, current.as_ref());
     });
 }
