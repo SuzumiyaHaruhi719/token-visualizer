@@ -173,7 +173,7 @@ mod tests {
         assert!(s.ends_with("/api/summary?range=all"), "path preserved: {s}");
         if cfg!(debug_assertions) {
             // dev: page served by the Vite dev server (HMR)
-            assert!(s.starts_with("http://localhost:1420/"), "dev base: {s}");
+            assert!(s.starts_with("http://localhost:5847/"), "dev base: {s}");
         } else {
             // release: page served by the embedded axum server
             assert!(s.starts_with("http://127.0.0.1:54321/"), "release base: {s}");
