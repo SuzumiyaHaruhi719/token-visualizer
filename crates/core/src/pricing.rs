@@ -60,12 +60,11 @@ impl Default for PriceTable {
 impl PriceTable {
     /// Seed with Anthropic's public Claude 4.x pricing (USD per million tokens).
     ///
-    // TODO: confirm exact $/M from Anthropic pricing page. These are seed values;
-    // they are config-overridable via `pricing.json`, so correctness here is data,
-    // not code. Current seeds: Opus 4.x = $15 in / $75 out, Sonnet 4.x = $3 / $15,
-    // Haiku 4.x = $1 / $5.
+    // Anthropic list prices, USD per million tokens (verified June 2026):
+    // Opus 4.6/4.7/4.8 = $5 in / $25 out, Sonnet 4.x = $3 / $15, Haiku 4.5 = $1 / $5.
+    // Cache write = 1.25x input, cache read = 0.10x input. Overridable via pricing.json.
     pub fn seeded() -> Self {
-        let opus = Rate::new(15.0, 75.0);
+        let opus = Rate::new(5.0, 25.0);
         let sonnet = Rate::new(3.0, 15.0);
         let haiku = Rate::new(1.0, 5.0);
         let prefixes = vec![
