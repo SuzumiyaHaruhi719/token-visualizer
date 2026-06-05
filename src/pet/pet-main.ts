@@ -97,9 +97,31 @@ async function openDashboard(): Promise<void> {
   }
 }
 
+/**
+ * Force the transparent WebView2 window to repaint every frame. Windows does not
+ * continuously composite a transparent, decoration-less window, so pure-CSS
+ * animations freeze until some input arrives. A rAF-driven sub-pixel nudge on a
+ * tiny hidden element keeps the render pipeline ticking so the Clawd animates.
+ */
+function startRepaintPump(): void {
+  const pump = document.createElement("div");
+  pump.setAttribute("aria-hidden", "true");
+  pump.style.cssText =
+    "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.004;pointer-events:none;will-change:transform;";
+  document.body.appendChild(pump);
+  let n = 0;
+  const tick = (): void => {
+    n ^= 1;
+    pump.style.transform = `translateX(${n * 0.02}px)`;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 function bootstrap(): void {
   const root = document.getElementById("pet") ?? document.body;
   const els = renderShell(root as HTMLElement);
+  startRepaintPump();
   const sessionId = getSessionId();
 
   // Initial placeholder state until the stream resolves our session.
