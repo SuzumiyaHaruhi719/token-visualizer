@@ -52,11 +52,11 @@ fn port_init_script(port: u16) -> String {
     format!("window.__CM_PORT__ = {port};")
 }
 
-/// Create (or focus) the dashboard window pointing at the server root.
+/// Create the dashboard window **hidden** at startup. The app is tray-first, so
+/// it never pops up or steals focus on launch/relaunch (which would cover
+/// whatever you're working on). Reveal it on demand with [`show_dashboard`].
 pub fn create_dashboard(app: &AppHandle, port: u16) -> tauri::Result<()> {
-    if let Some(win) = app.get_webview_window(DASHBOARD_LABEL) {
-        let _ = win.show();
-        let _ = win.set_focus();
+    if app.get_webview_window(DASHBOARD_LABEL).is_some() {
         return Ok(());
     }
     WebviewWindowBuilder::new(
@@ -67,18 +67,22 @@ pub fn create_dashboard(app: &AppHandle, port: u16) -> tauri::Result<()> {
     .title("Claude Monitor")
     .inner_size(1100.0, 720.0)
     .resizable(true)
+    .visible(false) // tray-first: do not show on launch
     .initialization_script(port_init_script(port))
     .build()?;
     Ok(())
 }
 
-/// Show + focus the dashboard window if it exists, else (re)create it.
+/// Reveal + focus the dashboard (creating it if needed). Called from the tray
+/// ("Open Dashboard" / tray click) — the only way the window ever appears.
 pub fn show_dashboard(app: &AppHandle, port: u16) {
+    if app.get_webview_window(DASHBOARD_LABEL).is_none() {
+        let _ = create_dashboard(app, port);
+    }
     if let Some(win) = app.get_webview_window(DASHBOARD_LABEL) {
         let _ = win.show();
+        let _ = win.unminimize();
         let _ = win.set_focus();
-    } else {
-        let _ = create_dashboard(app, port);
     }
 }
 
