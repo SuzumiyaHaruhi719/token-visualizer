@@ -33,8 +33,16 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri`, the Rust build output, and
+      //    git worktrees under `.claude/` (agent worktrees carry their own copies
+      //    of the project, which would otherwise thrash Vite's watcher and can
+      //    crash the dev server).
+      ignored: [
+        "**/src-tauri/**",
+        "**/.claude/**",
+        "**/target/**",
+        "**/dist/**",
+      ],
     },
   },
 }));
