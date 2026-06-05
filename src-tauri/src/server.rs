@@ -30,6 +30,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 /// Capacity of the SSE broadcast channel. Lagging clients drop old frames
@@ -126,6 +127,9 @@ pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
         .route("/api/pricing", get(get_pricing).put(put_pricing))
         .route("/events", get(sse_handler))
         .fallback_service(static_files)
+        // Permissive CORS so the Vite dev server origin (localhost:1420) can call
+        // the axum API/SSE in `tauri dev`. Same-origin in release, so it's a no-op there.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

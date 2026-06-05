@@ -30,11 +30,26 @@ const PET_DY: f64 = 40.0;
 const PET_X0: f64 = 80.0;
 const PET_Y0: f64 = 80.0;
 
-/// Build the URL for a server-served page (relative path under the origin).
+/// URL to LOAD a frontend page. In debug builds the page is served by the Vite
+/// dev server (so frontend edits hot-reload via `tauri dev`); in release it is
+/// served by the embedded axum server. Either way the page talks to the axum
+/// API through the injected `window.__CM_PORT__` (see [`port_init_script`]).
 fn server_url(port: u16, path: &str) -> tauri::Url {
-    format!("http://127.0.0.1:{port}{path}")
+    let base = if cfg!(debug_assertions) {
+        // Vite dev server (tauri.conf `devUrl` / `beforeDevCommand: npm run dev`).
+        "http://localhost:1420".to_string()
+    } else {
+        format!("http://127.0.0.1:{port}")
+    };
+    format!("{base}{path}")
         .parse()
-        .expect("static server URL is always valid")
+        .expect("page URL is always valid")
+}
+
+/// Script injected before page load so the frontend's API client targets the
+/// axum server even when the page itself is served by the Vite dev server.
+fn port_init_script(port: u16) -> String {
+    format!("window.__CM_PORT__ = {port};")
 }
 
 /// Create (or focus) the dashboard window pointing at the server root.
@@ -52,6 +67,7 @@ pub fn create_dashboard(app: &AppHandle, port: u16) -> tauri::Result<()> {
     .title("Claude Monitor")
     .inner_size(1100.0, 720.0)
     .resizable(true)
+    .initialization_script(port_init_script(port))
     .build()?;
     Ok(())
 }
@@ -106,6 +122,7 @@ pub fn sync_pets(app: &AppHandle, port: u16, sessions: &[SessionState]) {
             .always_on_top(true)
             .skip_taskbar(true)
             .shadow(false)
+            .initialization_script(port_init_script(port))
             .build();
         if let Err(e) = res {
             eprintln!("[windows] failed to spawn pet {label}: {e}");
@@ -129,9 +146,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_url_builds_relative_paths() {
+    fn server_url_builds_pages_per_profile() {
         let u = server_url(54321, "/api/summary?range=all");
-        assert_eq!(u.as_str(), "http://127.0.0.1:54321/api/summary?range=all");
+        let s = u.as_str();
+        assert!(s.ends_with("/api/summary?range=all"), "path preserved: {s}");
+        if cfg!(debug_assertions) {
+            // dev: page served by the Vite dev server (HMR)
+            assert!(s.starts_with("http://localhost:1420/"), "dev base: {s}");
+        } else {
+            // release: page served by the embedded axum server
+            assert!(s.starts_with("http://127.0.0.1:54321/"), "release base: {s}");
+        }
     }
 
     #[test]
