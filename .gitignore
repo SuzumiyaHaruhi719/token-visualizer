@@ -1,0 +1,23 @@
+# Rust / Tauri
+/src-tauri/target/
+target/
+**/*.rs.bk
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Local data (SQLite)
+*.db
+*.db-wal
+*.db-shm
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Brainstorm scratch
+.superpowers/
