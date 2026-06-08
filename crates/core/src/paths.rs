@@ -29,6 +29,18 @@ pub fn sessions_dir() -> Result<PathBuf> {
     Ok(claude_home()?.join("sessions"))
 }
 
+/// `~/.codex` — the root of OpenAI Codex CLI's data. Read-only.
+pub fn codex_home() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("could not resolve home directory"))?;
+    Ok(home.join(".codex"))
+}
+
+/// `~/.codex/sessions` — Codex rollout jsonl logs, nested `<YYYY>/<MM>/<DD>/`.
+/// Read-only.
+pub fn codex_sessions_dir() -> Result<PathBuf> {
+    Ok(codex_home()?.join("sessions"))
+}
+
 /// The app's own writable data directory, e.g. `%APPDATA%/claude-monitor`.
 ///
 /// Falls back to the home dir if the platform data dir is unavailable, but

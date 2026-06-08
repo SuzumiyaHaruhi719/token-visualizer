@@ -7,6 +7,36 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Which tool a usage event originated from. Serialized lowercase
+/// (`"claude"` / `"codex"`) for the frontend and the `events.source` column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// Claude Code (`~/.claude/projects/**/*.jsonl`).
+    #[default]
+    Claude,
+    /// OpenAI Codex CLI (`~/.codex/sessions/**/rollout-*.jsonl`).
+    Codex,
+}
+
+impl Source {
+    /// The lowercase string used in the `events.source` column and JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Claude => "claude",
+            Source::Codex => "codex",
+        }
+    }
+
+    /// Parse from the stored column string; unknown values map to `Claude`.
+    pub fn from_str_or_claude(s: &str) -> Self {
+        match s {
+            "codex" => Source::Codex,
+            _ => Source::Claude,
+        }
+    }
+}
+
 /// Token usage extracted from one assistant `message.usage` block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -43,6 +73,10 @@ pub struct ParsedEvent {
     pub project: String,
     pub model: String,
     pub usage: Usage,
+    /// Which tool produced this event. Defaults to [`Source::Claude`] so older
+    /// callers and deserialized rows without the field keep working.
+    #[serde(default)]
+    pub source: Source,
 }
 
 /// What a single jsonl line represents (only the variants we care about).
@@ -123,6 +157,15 @@ pub struct ProjectBreakdown {
     pub tokens: i64,
 }
 
+/// Per-source breakdown row (Claude vs Codex).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBreakdown {
+    pub source: Source,
+    pub tokens: i64,
+    pub cost_usd: Option<f64>,
+}
+
 /// One time-bucket (daily) of the stacked token timeseries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,5 +186,7 @@ pub struct Summary {
     pub totals: Totals,
     pub by_model: Vec<ModelBreakdown>,
     pub by_project: Vec<ProjectBreakdown>,
+    /// Per-source (Claude vs Codex) token + cost breakdown.
+    pub by_source: Vec<SourceBreakdown>,
     pub timeseries: Vec<TimeseriesBucket>,
 }

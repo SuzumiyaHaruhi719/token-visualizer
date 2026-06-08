@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::importer::read_new_complete_lines;
+use crate::importer::{codex_offset_key, read_new_codex_events, read_new_complete_lines};
 use crate::model::{LineKind, ParsedEvent};
 use crate::store::Store;
 
@@ -101,20 +101,92 @@ pub fn process_file_update(path: &Path, store: &Store, tx: &Sender<WatchEvent>) 
     Ok(())
 }
 
+/// Process a single changed Codex rollout file: read new complete lines from the
+/// (namespaced) stored offset, persist the parsed `token_count` turns, advance
+/// the offset, and forward a [`WatchEvent`] if anything new was read.
+pub fn process_codex_file_update(
+    path: &Path,
+    store: &Store,
+    tx: &Sender<WatchEvent>,
+) -> Result<()> {
+    if !is_codex_rollout(path) {
+        return Ok(());
+    }
+    let key = codex_offset_key(path);
+    let offset = store.get_offset(&key)?;
+    let read = read_new_codex_events(path, offset)?;
+
+    if read.new_offset == offset && read.events.is_empty() {
+        return Ok(()); // nothing new
+    }
+
+    if !read.events.is_empty() {
+        let batch: Vec<(ParsedEvent, i64)> = read
+            .events
+            .iter()
+            .cloned()
+            .map(|e| (e, read.start_offset as i64))
+            .collect();
+        store.insert_batch_at(&batch, &path.to_string_lossy())?;
+    }
+    store.set_offset(&key, read.new_offset)?;
+
+    if !read.events.is_empty() {
+        let _ = tx.send(WatchEvent::Events {
+            file: path.to_path_buf(),
+            events: read.events,
+            lines: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+/// True for `rollout-*.jsonl` files (Codex rollout logs).
+fn is_codex_rollout(path: &Path) -> bool {
+    path.extension().map(|x| x == "jsonl").unwrap_or(false)
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("rollout-"))
+            .unwrap_or(false)
+}
+
+/// Start watching `codex_sessions_dir` recursively for Codex rollout files.
+/// Mirrors [`watch`] but routes file updates through
+/// [`process_codex_file_update`].
+pub fn watch_codex(
+    codex_sessions_dir: &Path,
+    store: Store,
+    tx: Sender<WatchEvent>,
+) -> Result<WatchHandle> {
+    watch_with(codex_sessions_dir, store, tx, process_codex_file_update)
+}
+
 /// Start watching `projects_dir` recursively. Returns a [`WatchHandle`] that
 /// keeps the watcher running until stopped/dropped.
 pub fn watch(projects_dir: &Path, store: Store, tx: Sender<WatchEvent>) -> Result<WatchHandle> {
+    watch_with(projects_dir, store, tx, process_file_update)
+}
+
+/// Shared watcher bootstrap: spawn a `notify` watcher over `dir` and run the
+/// debounce loop, dispatching each touched path through `process`.
+fn watch_with(
+    dir: &Path,
+    store: Store,
+    tx: Sender<WatchEvent>,
+    process: fn(&Path, &Store, &Sender<WatchEvent>) -> Result<()>,
+) -> Result<WatchHandle> {
     let (raw_tx, raw_rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
     let mut watcher = notify::recommended_watcher(move |res| {
         let _ = raw_tx.send(res);
     })?;
-    watcher.watch(projects_dir, RecursiveMode::Recursive)?;
+    watcher.watch(dir, RecursiveMode::Recursive)?;
 
     let join = std::thread::spawn(move || {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_loop(raw_rx, stop_rx, &store, &tx);
+            run_loop(raw_rx, stop_rx, &store, &tx, process);
         }))
         .is_err()
         {
@@ -136,6 +208,7 @@ fn run_loop(
     stop_rx: mpsc::Receiver<()>,
     store: &Store,
     tx: &Sender<WatchEvent>,
+    process: fn(&Path, &Store, &Sender<WatchEvent>) -> Result<()>,
 ) {
     loop {
         if stop_rx.try_recv().is_ok() {
@@ -161,7 +234,7 @@ fn run_loop(
         }
 
         for path in touched {
-            let _ = process_file_update(&path, store, tx);
+            let _ = process(&path, store, tx);
         }
     }
 }

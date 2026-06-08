@@ -67,6 +67,11 @@ impl PriceTable {
         let opus = Rate::new(5.0, 25.0);
         let sonnet = Rate::new(3.0, 15.0);
         let haiku = Rate::new(1.0, 5.0);
+        // OpenAI GPT-5.x public list prices, USD per million tokens.
+        // TODO confirm exact gpt-5.x rates; overridable via pricing.json.
+        let gpt5 = Rate::new(1.25, 10.0);
+        let gpt5_mini = Rate::new(0.25, 2.0);
+        let gpt5_nano = Rate::new(0.05, 0.40);
         let prefixes = vec![
             ("claude-opus-4-8".to_string(), opus),
             ("claude-opus-4".to_string(), opus),
@@ -74,6 +79,11 @@ impl PriceTable {
             ("claude-sonnet-4".to_string(), sonnet),
             ("claude-haiku-4-5".to_string(), haiku),
             ("claude-haiku-4".to_string(), haiku),
+            // Codex / GPT-5.x. Longest-prefix wins, so the mini/nano variants
+            // are matched ahead of the bare `gpt-5` rule.
+            ("gpt-5-mini".to_string(), gpt5_mini),
+            ("gpt-5-nano".to_string(), gpt5_nano),
+            ("gpt-5".to_string(), gpt5),
         ];
         Self {
             rates: HashMap::new(),

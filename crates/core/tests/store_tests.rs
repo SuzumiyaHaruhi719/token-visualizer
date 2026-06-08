@@ -13,6 +13,7 @@ fn ev(id: &str) -> ParsedEvent {
             output: 5,
             ..Default::default()
         },
+        source: core::model::Source::Claude,
     }
 }
 

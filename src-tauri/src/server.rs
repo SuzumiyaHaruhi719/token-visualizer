@@ -125,6 +125,7 @@ pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
         .route("/api/current", get(get_current))
         .route("/api/sessions", get(get_sessions))
         .route("/api/pricing", get(get_pricing).put(put_pricing))
+        .route("/api/limits", get(get_limits))
         .route("/events", get(sse_handler))
         .fallback_service(static_files)
         // Permissive CORS so the Vite dev server origin (localhost:5847) can call
@@ -200,6 +201,125 @@ async fn put_pricing(
         }
     }
     Ok(Json(new_table))
+}
+
+// ---------------------------------------------------------------------------
+// /api/limits — per-source session usage + rate limits
+// ---------------------------------------------------------------------------
+
+/// Top-level `/api/limits` payload.
+#[derive(Debug, Clone, Serialize)]
+struct LimitsResponse {
+    claude: ClaudeLimits,
+    codex: CodexLimits,
+}
+
+/// Claude side: rate-limit remaining/reset is NOT logged locally, so only the
+/// current session is exposed; the window fields are always `null`.
+#[derive(Debug, Clone, Serialize)]
+struct ClaudeLimits {
+    session: Option<ClaudeSession>,
+    #[serde(rename = "fiveHour")]
+    five_hour: Option<RateWindowDto>,
+    weekly: Option<RateWindowDto>,
+    note: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSession {
+    project: String,
+    model: String,
+    tokens: i64,
+    state: cmcore::model::PetState,
+}
+
+/// Codex side: session usage + the two rate-limit windows.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexLimits {
+    session: Option<CodexSession>,
+    #[serde(rename = "fiveHour")]
+    five_hour: Option<RateWindowDto>,
+    weekly: Option<RateWindowDto>,
+    plan_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSession {
+    model: String,
+    tokens: i64,
+}
+
+/// A rate-limit window for the API (`remainingPercent = 100 - usedPercent`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RateWindowDto {
+    used_percent: f64,
+    remaining_percent: f64,
+    resets_at: i64,
+}
+
+impl From<cmcore::codex::RateWindow> for RateWindowDto {
+    fn from(w: cmcore::codex::RateWindow) -> Self {
+        Self {
+            used_percent: w.used_percent,
+            remaining_percent: 100.0 - w.used_percent,
+            resets_at: w.resets_at,
+        }
+    }
+}
+
+/// `GET /api/limits`: Claude current session (no local rate-limit data) + the
+/// latest Codex rollout's cumulative usage and rate-limit windows.
+async fn get_limits(State(state): State<AppState>) -> Json<LimitsResponse> {
+    // Claude: reuse the live `current` session snapshot.
+    let claude_session = state.current.read().await.clone().map(|c| ClaudeSession {
+        project: c.project,
+        model: c.model,
+        tokens: c.tokens,
+        state: c.state,
+    });
+
+    // Codex: read the latest rollout live (cheap; per request).
+    let codex = match cmcore::paths::codex_sessions_dir() {
+        Ok(dir) => cmcore::codex::latest_snapshot(&dir),
+        Err(_) => None,
+    };
+    let codex_limits = match codex {
+        Some(snap) => {
+            let (primary, secondary, plan_type) = match snap.rate_limits {
+                Some(rl) => (rl.primary, rl.secondary, rl.plan_type),
+                None => (None, None, None),
+            };
+            CodexLimits {
+                session: Some(CodexSession {
+                    model: snap.model,
+                    tokens: snap.total.total,
+                }),
+                five_hour: primary.map(Into::into),
+                weekly: secondary.map(Into::into),
+                plan_type,
+            }
+        }
+        None => CodexLimits {
+            session: None,
+            five_hour: None,
+            weekly: None,
+            plan_type: None,
+        },
+    };
+
+    Json(LimitsResponse {
+        claude: ClaudeLimits {
+            session: claude_session,
+            five_hour: None,
+            weekly: None,
+            note: "remaining not exposed locally",
+        },
+        codex: codex_limits,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +473,7 @@ mod tests {
                 cache_read: 2000,
                 ..Default::default()
             },
+            source: cmcore::model::Source::Claude,
         }
     }
 
@@ -421,6 +542,53 @@ mod tests {
             .unwrap();
         let sessions: Vec<SessionState> = serde_json::from_slice(&body).unwrap();
         assert!(sessions.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/api/limits` returns 200 + the documented per-source envelope shape.
+    /// Codex fields may be null on machines without `~/.codex`; the Claude note
+    /// and key set are always present.
+    #[tokio::test]
+    async fn limits_endpoint_returns_envelope() {
+        let dir = std::env::temp_dir().join(format!("cm-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("lim.sqlite");
+        let _ = Store::open(&db_path).unwrap();
+        let state = AppState::new(db_path, PriceTable::seeded());
+        let app = build_router(state, dir.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/limits")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Claude envelope.
+        assert!(v["claude"].is_object());
+        assert_eq!(
+            v["claude"]["note"].as_str(),
+            Some("remaining not exposed locally")
+        );
+        assert!(v["claude"].get("fiveHour").is_some());
+        assert!(v["claude"].get("weekly").is_some());
+        assert!(v["claude"].get("session").is_some());
+
+        // Codex envelope: keys always present (values may be null).
+        assert!(v["codex"].is_object());
+        assert!(v["codex"].get("session").is_some());
+        assert!(v["codex"].get("fiveHour").is_some());
+        assert!(v["codex"].get("weekly").is_some());
+        assert!(v["codex"].get("planType").is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

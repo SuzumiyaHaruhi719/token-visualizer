@@ -15,6 +15,7 @@ fn assistant(id: &str) -> LineKind {
             output: 1,
             ..Default::default()
         },
+        source: core::model::Source::Claude,
     })
 }
 

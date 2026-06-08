@@ -14,6 +14,7 @@ fn mk(id: &str, ts: i64, model: &str, project: &str, u: Usage) -> ParsedEvent {
         project: project.into(),
         model: model.into(),
         usage: u,
+        source: core::model::Source::Claude,
     }
 }
 
@@ -258,4 +259,49 @@ fn unknown_range_defaults_to_all() {
     let s = seeded_store();
     let sum = summary(&s, "garbage").unwrap();
     assert_eq!(sum.totals.messages, 3);
+}
+
+#[test]
+fn all_seeded_events_are_claude_source() {
+    let s = seeded_store();
+    let sum = summary(&s, "all").unwrap();
+    // Only Claude events seeded: exactly one source row, all tokens under it.
+    assert_eq!(sum.by_source.len(), 1);
+    let claude = &sum.by_source[0];
+    assert_eq!(claude.source, core::model::Source::Claude);
+    assert_eq!(claude.tokens, sum.totals.tokens);
+    // Claude numbers unchanged by the new field.
+    assert_eq!(sum.totals.tokens, 600 + 300 + 20 + 200);
+}
+
+#[test]
+fn by_source_splits_claude_and_codex() {
+    let s = seeded_store();
+    // Add one Codex event mapped via the codex helper (last-usage shape).
+    let last = core::codex::CodexUsage {
+        input: 1000,
+        cached_input: 400,
+        output: 50,
+        reasoning: 10,
+        total: 1060,
+    };
+    let e = core::codex::codex_event(&last, "codex-sess", "gpt-5.4", "CodexProj", DAY2, 4096);
+    s.insert_event(&e).unwrap();
+
+    let sum = summary(&s, "all").unwrap();
+    assert_eq!(sum.by_source.len(), 2);
+    let codex = sum
+        .by_source
+        .iter()
+        .find(|b| b.source == core::model::Source::Codex)
+        .expect("codex source row");
+    // mapped usage: input=600, cache_read=400, output=60, cache_create=0 => 1060 tokens
+    assert_eq!(codex.tokens, 1060);
+    assert!(codex.cost_usd.is_some(), "gpt-5.x is priced");
+    let claude = sum
+        .by_source
+        .iter()
+        .find(|b| b.source == core::model::Source::Claude)
+        .expect("claude source row");
+    assert_eq!(claude.tokens, 1120); // unchanged Claude total
 }

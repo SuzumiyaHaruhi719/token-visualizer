@@ -5,6 +5,7 @@
 //! Strictly read-only on `~/.claude`; all persistence goes to the app's own
 //! data directory.
 
+pub mod codex;
 pub mod importer;
 pub mod model;
 pub mod parser;
@@ -16,6 +17,6 @@ pub mod store;
 pub mod watcher;
 
 pub use model::{
-    LineKind, ModelBreakdown, ParsedEvent, PetState, ProjectBreakdown, SessionState, Summary,
-    TimeseriesBucket, Totals, Usage,
+    LineKind, ModelBreakdown, ParsedEvent, PetState, ProjectBreakdown, SessionState, Source,
+    SourceBreakdown, Summary, TimeseriesBucket, Totals, Usage,
 };

@@ -90,9 +90,11 @@ pub fn run() {
 
             // --- backfill (own thread, own Store) ----------------------------
             spawn_backfill(state.clone());
+            spawn_codex_backfill(state.clone());
 
             // --- live watcher + bridge to the SSE bus ------------------------
             spawn_watcher(state.clone(), db_path.clone());
+            spawn_codex_watcher(state.clone(), db_path.clone());
 
             // --- state-poll loop (live pet state + windows + tray) -----------
             {
@@ -165,6 +167,87 @@ fn spawn_backfill(state: AppState) {
             }
         })
         .expect("spawn backfill thread");
+}
+
+/// Spawn the one-shot Codex backfill on its own thread + Store. Read-only over
+/// `~/.codex/sessions`. Does not touch the `import` progress bar (that tracks
+/// the Claude backfill); failures are logged, never fatal.
+fn spawn_codex_backfill(state: AppState) {
+    std::thread::Builder::new()
+        .name("cm-codex-backfill".into())
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let dir = match cmcore::paths::codex_sessions_dir() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[codex-backfill] no sessions dir: {e}");
+                        return;
+                    }
+                };
+                if !dir.is_dir() {
+                    return; // Codex not installed on this machine.
+                }
+                let store = match Store::open(&state.db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[codex-backfill] open store: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = cmcore::importer::backfill_codex(&dir, &store, |_, _| {}) {
+                    eprintln!("[codex-backfill] error: {e:#}");
+                }
+            }))
+            .is_err()
+            {
+                eprintln!("[codex-backfill] thread panicked");
+            }
+        })
+        .expect("spawn codex-backfill thread");
+}
+
+/// Start the live Codex `notify` watcher over `~/.codex/sessions` plus a bridge
+/// thread that refreshes `current` on new events. Mirrors [`spawn_watcher`].
+fn spawn_codex_watcher(state: AppState, db_path: PathBuf) {
+    let dir = match cmcore::paths::codex_sessions_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[codex-watcher] no sessions dir: {e}");
+            return;
+        }
+    };
+    if !dir.is_dir() {
+        return; // Codex not installed: nothing to watch.
+    }
+
+    let (tx_watch, rx_watch) = std::sync::mpsc::channel::<WatchEvent>();
+    let watch_store = match Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[codex-watcher] open store: {e}");
+            return;
+        }
+    };
+    let handle = match watcher::watch_codex(&dir, watch_store, tx_watch) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[codex-watcher] failed to start: {e}");
+            return;
+        }
+    };
+
+    std::thread::Builder::new()
+        .name("cm-codex-watch-bridge".into())
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_watch_bridge(state, db_path, rx_watch, handle);
+            }))
+            .is_err()
+            {
+                eprintln!("[codex-watcher] bridge thread panicked");
+            }
+        })
+        .expect("spawn codex-watch-bridge thread");
 }
 
 /// Start the live `notify` watcher (which owns its own moved `Store`) and a

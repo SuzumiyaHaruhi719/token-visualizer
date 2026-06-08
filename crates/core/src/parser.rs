@@ -105,6 +105,7 @@ fn build_event(v: &Value, usage_val: &Value) -> ParsedEvent {
         project,
         model,
         usage: parse_usage(usage_val),
+        source: crate::model::Source::Claude,
     }
 }
 

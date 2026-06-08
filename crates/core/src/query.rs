@@ -9,7 +9,8 @@ use chrono::Utc;
 use rusqlite::params;
 
 use crate::model::{
-    ModelBreakdown, ProjectBreakdown, SessionState, Summary, TimeseriesBucket, Totals,
+    ModelBreakdown, ProjectBreakdown, SessionState, Source, SourceBreakdown, Summary,
+    TimeseriesBucket, Totals,
 };
 use crate::pricing::PriceTable;
 use crate::store::Store;
@@ -101,6 +102,7 @@ pub fn summary_with(
 
     let by_model = query_by_model(store, start, prices)?;
     let by_project = query_by_project(store, start)?;
+    let by_source = query_by_source(store, start, prices)?;
     let timeseries = query_timeseries(store, start)?;
 
     // Total cost = sum of priced per-model costs. Unknown models remain `None`
@@ -131,6 +133,7 @@ pub fn summary_with(
         totals,
         by_model,
         by_project,
+        by_source,
         timeseries,
     })
 }
@@ -197,6 +200,74 @@ fn query_by_model(
                 tokens: input + output + cc + cr,
                 cost_usd,
             }
+        })
+        .collect())
+}
+
+/// Per-source token + cost breakdown. Cost is summed from per-(source,model)
+/// rows so each source's models price correctly; a source's cost is `None` only
+/// when no model in it has a known price.
+fn query_by_source(
+    store: &Store,
+    start: Option<i64>,
+    prices: &PriceTable,
+) -> Result<Vec<SourceBreakdown>> {
+    let where_clause = if start.is_some() {
+        "WHERE ts >= ?1"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT source, model, \
+                COALESCE(SUM(input),0), COALESCE(SUM(output),0), \
+                COALESCE(SUM(cache_create),0), COALESCE(SUM(cache_read),0) \
+         FROM events {where_clause} \
+         GROUP BY source, model"
+    );
+    let conn = store.conn();
+    let mut stmt = conn.prepare(&sql)?;
+    let map = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, i64, i64, i64, i64)> {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    };
+    let rows: Vec<(String, String, i64, i64, i64, i64)> = if let Some(s) = start {
+        stmt.query_map(params![s], map)?
+            .collect::<rusqlite::Result<_>>()?
+    } else {
+        stmt.query_map([], map)?.collect::<rusqlite::Result<_>>()?
+    };
+
+    // Aggregate per-(source,model) rows up to one row per source.
+    use std::collections::BTreeMap;
+    let mut acc: BTreeMap<String, (i64, f64, bool)> = BTreeMap::new();
+    for (source, model, input, output, cc, cr) in rows {
+        let usage = crate::model::Usage {
+            input,
+            output,
+            cache_create: cc,
+            cache_read: cr,
+            ..Default::default()
+        };
+        let entry = acc.entry(source).or_insert((0, 0.0, false));
+        entry.0 += input + output + cc + cr;
+        if let Some(cost) = prices.cost_usd(&usage, &model) {
+            entry.1 += cost;
+            entry.2 = true;
+        }
+    }
+
+    Ok(acc
+        .into_iter()
+        .map(|(source, (tokens, cost, priced))| SourceBreakdown {
+            source: Source::from_str_or_claude(&source),
+            tokens,
+            cost_usd: if priced { Some(cost) } else { None },
         })
         .collect())
 }

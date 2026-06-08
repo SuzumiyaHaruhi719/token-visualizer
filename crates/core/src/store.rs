@@ -13,7 +13,7 @@ use rusqlite::{params, Connection};
 use crate::model::ParsedEvent;
 
 /// Bump when the `events`/`import_state` schema changes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS events (
     cache_read   INTEGER NOT NULL,
     web_search   INTEGER NOT NULL,
     web_fetch    INTEGER NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'claude',
     source_file  TEXT,
     line_offset  INTEGER
 );
@@ -35,6 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_model ON events(model);
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 
 CREATE TABLE IF NOT EXISTS import_state (
     file           TEXT PRIMARY KEY,
@@ -77,6 +79,24 @@ impl Store {
         }
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
         self.conn.execute_batch(SCHEMA_SQL)?;
+        self.migrate()?;
+        Ok(())
+    }
+
+    /// Apply forward-only migrations to a pre-existing `events` table. Adding the
+    /// `source` column to a v1 DB is idempotent: if it already exists (fresh DB
+    /// from `SCHEMA_SQL`) the `ALTER` errors and is ignored.
+    fn migrate(&self) -> Result<()> {
+        let has_source = self
+            .conn
+            .prepare("SELECT source FROM events LIMIT 0")
+            .is_ok();
+        if !has_source {
+            self.conn.execute_batch(
+                "ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'claude';
+                 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);",
+            )?;
+        }
         Ok(())
     }
 
@@ -187,8 +207,8 @@ fn insert_one(
         "INSERT OR IGNORE INTO events
             (request_id, ts, session_id, project, model,
              input, output, cache_create, cache_read, web_search, web_fetch,
-             source_file, line_offset)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             source, source_file, line_offset)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             e.request_id,
             e.ts,
@@ -201,6 +221,7 @@ fn insert_one(
             e.usage.cache_read,
             e.usage.web_search,
             e.usage.web_fetch,
+            e.source.as_str(),
             source_file,
             offset,
         ],
