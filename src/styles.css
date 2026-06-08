@@ -418,9 +418,11 @@ body {
 .odo-digit {
   display: inline-block;
   overflow: hidden;
-  /* One glyph tall; width is one tabular digit (ch is exact under tabular-nums). */
+  /* One glyph tall; width is ONE full tabular digit advance. Under tabular-nums
+     every digit advances by exactly 1ch, so the cell must be 1ch — a narrower
+     cell (e.g. 0.62ch) clips each glyph and the digits overlap/squish together. */
   height: 1em;
-  width: 0.62ch;
+  width: 1ch;
   vertical-align: top;
 }
 .odo-strip {
