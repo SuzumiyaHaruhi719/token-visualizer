@@ -428,8 +428,10 @@ body {
 .odo-strip {
   display: flex;
   flex-direction: column;
-  /* will-change hints WebView2 to keep this on its own layer for smooth rolls. */
-  will-change: transform;
+  /* NOTE: no `will-change: transform` here. Promoting each strip to its own
+     compositing layer made the glass panel's backdrop-filter stop applying
+     behind the digits, painting an ugly hard-edged dark box that didn't blend
+     with the panel. The translateY rolls repaint fine without it. */
 }
 .odo-glyph {
   display: block;

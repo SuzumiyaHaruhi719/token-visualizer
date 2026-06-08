@@ -29,16 +29,14 @@ import { formatInt } from "../lib/format";
 const DIGIT_BASE = 10; // base-10 places
 const STRIP_GLYPHS = DIGIT_BASE + 1; // 0..9 then a wrap-around 0
 
-// Easing tuned so closing a gap takes ~1.5-3s: each frame we move the remaining
-// distance by EASE_FRACTION (geometric approach) but never less than
-// MIN_VELOCITY units/sec, so even a tiny gap keeps visibly rolling rather than
-// crawling asymptotically. CONVERGE_EPSILON ends the roll (and stops scheduling
-// rAF) once we're within <1 of target — critical so the synchronous rAF test
-// stub terminates instead of looping forever.
-const EASE_FRACTION = 0.06; // fraction of remaining gap closed per ~16ms frame
-const MIN_VELOCITY = 1.2; // minimum units per second so motion stays visible
-const CONVERGE_EPSILON = 1; // snap + stop when within this of target
-const NOMINAL_FRAME_MS = 16.6667; // reference frame for EASE_FRACTION scaling
+// Interpolation-buffer playback: we deliberately render ONE telemetry sample
+// behind real time and always interpolate between the two most recent buffered
+// samples. As long as new samples keep arriving (the dashboard feeds one every
+// ~500ms), there is always a "next" sample to roll toward, so the odometer rolls
+// CONTINUOUSLY instead of easing to the latest value and stopping. RENDER_DELAY
+// is the lag (a bit more than the sample cadence so a next sample is always
+// buffered); when samples stop, playback drains to the last value and halts.
+const RENDER_DELAY_MS = 750;
 // A higher wheel (tens and up) only rolls during the final (1 - CARRY_START) of
 // its approach — i.e. when the wheel below it is wrapping 9->0 — so settled
 // numbers read crisply instead of every wheel parking at a fractional offset.
@@ -111,10 +109,13 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   // Strips currently in the DOM, units-first (index 0 = units place). Preserved
   // across rebuilds so persisting places keep their wheel offset.
   let strips: HTMLElement[] = [];
-  let displayed = 0; // continuously-eased float that drives the wheels
-  let target = 0; // latest value to roll toward
+  let displayed = 0; // the value currently painted on the wheels (a float)
+  let latest = 0; // most recent value pushed (returned by value())
+  // Buffer of recent samples in ASCENDING time order; the driver plays back
+  // through these RENDER_DELAY_MS behind real time so it always has a segment
+  // to interpolate (continuous roll). Timestamps use `clock()` (== rAF's clock).
+  let samples: { v: number; t: number }[] = [];
   let frame = 0; // active rAF handle (0 == not scheduled)
-  let lastTime: number | null = null; // previous frame timestamp for dt
 
   function buildStrip(): HTMLElement {
     const cell = document.createElement("span");
@@ -196,9 +197,9 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
 
   /** Paint all wheels for the current `displayed` float, rebuilding if needed. */
   function render(): void {
-    // The number of digit columns tracks the larger of displayed/target so a
+    // The number of digit columns tracks the larger of displayed/latest so a
     // growing roll has the columns ready before it crosses the boundary.
-    const count = Math.max(digitCount(displayed), digitCount(target), 1);
+    const count = Math.max(digitCount(displayed), digitCount(latest), 1);
     if (strips.filter(Boolean).length !== count) {
       rebuild(count);
     }
@@ -215,88 +216,127 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
     root.setAttribute("aria-label", root.dataset.value);
   }
 
+  /** Monotonic clock shared by sample timestamps and the rAF callback. */
+  function clock(): number {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+  }
+
   function stop(): void {
     if (frame && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(frame);
     }
     frame = 0;
-    lastTime = null;
   }
 
-  /** One driver frame: ease `displayed` toward `target`, render, reschedule. */
-  function step(now: number): void {
-    const dt = lastTime === null ? NOMINAL_FRAME_MS : Math.max(0, now - lastTime);
-    lastTime = now;
+  /** Drop samples older than the one bracketing the current render time. */
+  function trimSamples(renderTime: number): void {
+    // Keep the last sample at/just-before renderTime plus everything after, so
+    // the bracketing pair survives. Always retain at least the final 2.
+    let keepFrom = 0;
+    for (let i = 0; i < samples.length - 1; i++) {
+      if (samples[i + 1].t <= renderTime) keepFrom = i + 1;
+    }
+    if (keepFrom > 0) samples = samples.slice(keepFrom);
+  }
 
-    const gap = target - displayed;
-    if (Math.abs(gap) < CONVERGE_EPSILON) {
-      // Converged: snap exactly and STOP scheduling (terminates the test stub).
-      displayed = target;
-      render();
-      syncLabel();
-      stop();
-      return;
+  /**
+   * One playback frame: interpolate `displayed` between the two buffered samples
+   * that bracket `now - RENDER_DELAY_MS`, render, and reschedule until playback
+   * has drained to the latest sample (then stop so the rAF test stub terminates).
+   */
+  function step(now: number): void {
+    const renderTime = now - RENDER_DELAY_MS;
+
+    // Find bracket: `a` = last sample at/before renderTime, `b` = first after it.
+    let a = samples[0];
+    let b: { v: number; t: number } | null = null;
+    for (const s of samples) {
+      if (s.t <= renderTime) a = s;
+      else {
+        b = s;
+        break;
+      }
     }
 
-    // Geometric ease scaled to the real frame time, with a minimum velocity so
-    // a near-converged gap still visibly rolls instead of crawling forever.
-    const frames = dt / NOMINAL_FRAME_MS;
-    const easeStep = gap * (1 - Math.pow(1 - EASE_FRACTION, frames));
-    const minStep = Math.sign(gap) * MIN_VELOCITY * (dt / 1000);
-    let move = Math.abs(easeStep) > Math.abs(minStep) ? easeStep : minStep;
-    // Never overshoot the target.
-    if (Math.abs(move) >= Math.abs(gap)) move = gap;
-
-    displayed += move;
+    if (b) {
+      const span = Math.max(1, b.t - a.t);
+      const p = Math.min(1, Math.max(0, (renderTime - a.t) / span));
+      displayed = a.v + (b.v - a.v) * p;
+    } else {
+      // Drained: render time has reached the most recent sample.
+      displayed = a.v;
+    }
     render();
     syncLabel();
+    trimSamples(renderTime);
 
-    if (typeof requestAnimationFrame === "function") {
+    const last = samples[samples.length - 1];
+    if (b !== null && renderTime < last.t && typeof requestAnimationFrame === "function") {
       frame = requestAnimationFrame(step);
     } else {
-      // No rAF (test/edge): converge synchronously so we never stall mid-roll.
-      displayed = target;
+      // Idle: settle exactly on the latest value and stop scheduling.
+      displayed = last.v;
       render();
       syncLabel();
+      samples = [last];
+      frame = 0;
     }
   }
 
   function start(): void {
     if (frame) return; // already running
     if (typeof requestAnimationFrame !== "function") {
-      // No rAF available: jump straight to target.
-      displayed = target;
+      // No rAF (test/edge): jump straight to the latest value.
+      displayed = latest;
       render();
       syncLabel();
       return;
     }
-    lastTime = null;
     frame = requestAnimationFrame(step);
   }
 
   function snapTo(n: number): void {
-    const value = sanitize(n);
-    target = value;
-    displayed = value;
+    const v = sanitize(n);
+    latest = v;
+    displayed = v;
+    samples = [];
     stop();
     render();
     syncLabel();
   }
 
+  /**
+   * Push a new telemetry sample to roll toward. The driver plays back through
+   * the buffer RENDER_DELAY_MS behind real time, so consecutive samples produce
+   * one continuous roll. A downward jump (range switch to a smaller total) snaps
+   * instead of rolling backward for ages.
+   */
   function setTarget(n: number): void {
-    const value = sanitize(n);
-    // Downward target => range switch to a smaller total: snap, don't roll down
-    // for ages. Equal target => nothing to do.
-    if (value <= displayed) {
-      snapTo(value);
+    const v = sanitize(n);
+    if (v < displayed) {
+      snapTo(v);
       return;
     }
-    target = value;
+    latest = v;
+    if (v === displayed && samples.length === 0) {
+      // Nothing to animate yet and no roll in flight — just paint it.
+      render();
+      syncLabel();
+      return;
+    }
+    const t = clock();
+    if (samples.length === 0) {
+      // Seed a starting point one delay back so we roll from where we are now.
+      samples.push({ v: displayed, t: t - RENDER_DELAY_MS });
+    }
+    samples.push({ v, t });
     start();
   }
 
   function value(): number {
-    return target;
+    return latest;
   }
 
   return { el: root, setTarget, snapTo, setValue: snapTo, value };
