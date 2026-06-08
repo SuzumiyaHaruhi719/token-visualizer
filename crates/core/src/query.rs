@@ -5,7 +5,7 @@
 //! sums priced models and is `None` only when no in-range model has a price.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::params;
 
 use crate::model::{
@@ -376,4 +376,95 @@ pub fn session_tokens(store: &Store, session_id: &str) -> Result<i64> {
         |r| r.get(0),
     )?;
     Ok(n)
+}
+
+/// Total tokens recorded since the start of the current LOCAL day.
+///
+/// Uses the machine's local timezone (not UTC) so "today" matches what the
+/// user perceives. Powers the Discord Rich Presence "tokens today" figure.
+pub fn today_tokens_local(store: &Store) -> Result<i64> {
+    today_tokens_since(store, start_of_local_day_ms(Local::now()))
+}
+
+/// Sum of all token fields for events at or after `start_ms` (epoch millis).
+/// Split out from [`today_tokens_local`] so the boundary maths can be tested
+/// deterministically without depending on the wall clock.
+pub fn today_tokens_since(store: &Store, start_ms: i64) -> Result<i64> {
+    let conn = store.conn();
+    let n: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(input+output+cache_create+cache_read),0) \
+         FROM events WHERE ts >= ?1",
+        params![start_ms],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// Epoch millis of local midnight for the day containing `now`.
+fn start_of_local_day_ms(now: DateTime<Local>) -> i64 {
+    let date = now.date_naive();
+    let midnight = date.and_hms_opt(0, 0, 0).expect("00:00:00 is always valid");
+    // `from_local_datetime` can be ambiguous around DST transitions; take the
+    // earliest valid instant, falling back to the naive UTC interpretation.
+    match Local.from_local_datetime(&midnight).earliest() {
+        Some(dt) => dt.timestamp_millis(),
+        None => midnight.and_utc().timestamp_millis(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ParsedEvent, Source, Usage};
+    use crate::store::Store;
+
+    /// Build an event whose timestamp and token totals are caller-controlled.
+    fn event_at(request_id: &str, ts: i64, tokens: i64) -> ParsedEvent {
+        ParsedEvent {
+            request_id: request_id.to_string(),
+            ts,
+            session_id: "sess".to_string(),
+            project: "proj".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            usage: Usage {
+                input: tokens,
+                ..Default::default()
+            },
+            source: Source::Claude,
+        }
+    }
+
+    #[test]
+    fn today_tokens_since_sums_only_at_or_after_boundary() {
+        let store = Store::open_in_memory().unwrap();
+        let boundary = 1_700_000_000_000;
+        store.insert_event(&event_at("before", boundary - 1, 100)).unwrap();
+        store.insert_event(&event_at("at", boundary, 30)).unwrap();
+        store.insert_event(&event_at("after", boundary + 5_000, 7)).unwrap();
+
+        // Boundary is inclusive: the "before" event is excluded, the others summed.
+        assert_eq!(today_tokens_since(&store, boundary).unwrap(), 37);
+    }
+
+    #[test]
+    fn today_tokens_since_zero_on_empty_store() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(today_tokens_since(&store, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn start_of_local_day_is_midnight_local() {
+        // Pick an arbitrary local instant; the computed start must be <= it and
+        // round-trip back to local midnight (hour/min/sec all zero).
+        let now = Local::now();
+        let start_ms = start_of_local_day_ms(now);
+        assert!(start_ms <= now.timestamp_millis());
+
+        let start_local = Local.timestamp_millis_opt(start_ms).single().unwrap();
+        use chrono::Timelike;
+        assert_eq!(start_local.hour(), 0);
+        assert_eq!(start_local.minute(), 0);
+        assert_eq!(start_local.second(), 0);
+        assert_eq!(start_local.date_naive(), now.date_naive());
+    }
 }

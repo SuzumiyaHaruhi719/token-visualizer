@@ -51,7 +51,13 @@ pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri
             ID_PETS => {
                 let new = !pets_enabled.load(Ordering::Relaxed);
                 pets_enabled.store(new, Ordering::Relaxed);
-                settings::save(&Settings { pets_enabled: new });
+                // Preserve any other persisted settings (e.g. Discord config)
+                // by mutating only the pets toggle on the loaded snapshot.
+                let updated = Settings {
+                    pets_enabled: new,
+                    ..settings::load()
+                };
+                settings::save(&updated);
                 let _ = pets_item_cb.set_checked(new);
                 if !new {
                     windows::close_all_pets(app);

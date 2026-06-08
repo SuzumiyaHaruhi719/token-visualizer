@@ -7,13 +7,27 @@ use std::path::PathBuf;
 pub struct Settings {
     #[serde(default = "default_true")]
     pub pets_enabled: bool,
+    /// Whether to publish today's token total to Discord Rich Presence.
+    /// Off by default; only takes effect when a `discord_client_id` is also set.
+    #[serde(default)]
+    pub discord_enabled: bool,
+    /// Discord application (client) ID used for Rich Presence. There is no
+    /// sensible default — supply your own app id from the Discord developer
+    /// portal. When absent, the Discord integration stays off regardless of
+    /// `discord_enabled`.
+    #[serde(default)]
+    pub discord_client_id: Option<String>,
 }
 fn default_true() -> bool {
     true
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { pets_enabled: true }
+        Self {
+            pets_enabled: true,
+            discord_enabled: false,
+            discord_client_id: None,
+        }
     }
 }
 
@@ -43,7 +57,10 @@ mod tests {
 
     #[test]
     fn round_trips_pets_disabled() {
-        let s = Settings { pets_enabled: false };
+        let s = Settings {
+            pets_enabled: false,
+            ..Settings::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         assert!(
             json.contains("\"petsEnabled\":false") || json.contains("\"petsEnabled\": false"),

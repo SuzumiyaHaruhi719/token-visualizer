@@ -11,10 +11,13 @@
 //! Read-only invariant: nothing under `~/.claude` is ever opened for writing.
 //! All persistence (db, pricing, port file) lives under the app data dir.
 
+mod discord;
+mod notify;
 mod server;
 mod settings;
 mod state_poll;
 mod tray;
+mod util;
 mod windows;
 
 use std::path::PathBuf;
@@ -61,6 +64,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -114,6 +118,10 @@ pub fn run() {
                     })
                     .expect("spawn state-poll thread");
             }
+
+            // --- Discord Rich Presence (own thread, own Store) ---------------
+            // Off unless explicitly enabled with a client id in settings.json.
+            spawn_discord(state.clone());
 
             // --- desktop surface ---------------------------------------------
             windows::create_dashboard(&handle, port)?;
@@ -313,4 +321,32 @@ fn run_watch_bridge(
             }
         }
     }
+}
+
+/// Spawn the Discord Rich Presence updater on its own thread with its own
+/// `Store`. No-op unless `discord_enabled` is set AND a `discord_client_id` is
+/// present in settings.json — the integration is opt-in and never ships a
+/// hardcoded application id. Connection failures (Discord not running) are
+/// handled inside the loop with slow retries; they never crash the app.
+fn spawn_discord(state: AppState) {
+    let settings = settings::load();
+    let Some(client_id) = settings.discord_client_id.clone() else {
+        return; // No client id: integration disabled.
+    };
+    if !settings.discord_enabled || client_id.trim().is_empty() {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("cm-discord".into())
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                discord::run(&client_id, &state.db_path);
+            }))
+            .is_err()
+            {
+                eprintln!("[discord] thread panicked");
+            }
+        })
+        .expect("spawn discord thread");
 }

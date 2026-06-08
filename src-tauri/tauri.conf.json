@@ -20,7 +20,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../dist": "dist"
+      "../dist": "dist",
+      "assets/session-end.wav": "assets/session-end.wav"
     },
     "icon": [
       "icons/32x32.png",

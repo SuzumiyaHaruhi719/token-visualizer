@@ -24,6 +24,7 @@ use cmcore::store::Store;
 use tauri::AppHandle;
 use walkdir::WalkDir;
 
+use crate::notify::{self, SessionEndTracker};
 use crate::server::{AppState, SseEvent};
 use crate::{tray, windows};
 
@@ -47,6 +48,8 @@ pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicB
     let mut path_cache: HashMap<String, PathBuf> = HashMap::new();
     let mut last_emitted: Vec<SessionState> = Vec::new();
     let mut last_enabled = pets_enabled.load(Ordering::Relaxed);
+    // Tracks the live-session set across ticks to fire session-end notifications.
+    let mut end_tracker = SessionEndTracker::new();
 
     loop {
         let enabled = pets_enabled.load(Ordering::Relaxed);
@@ -56,6 +59,14 @@ pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicB
         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match poll_once(&state, &mut path_cache) {
                 Ok(sessions) => {
+                    // Session-end detection runs EVERY tick (even when the
+                    // emitted set is unchanged) so a disappearing session is
+                    // never missed by the change short-circuit below.
+                    let ended = end_tracker.observe(&sessions);
+                    if !ended.is_empty() {
+                        notify_ended(&app, ended);
+                    }
+
                     if sessions != last_emitted || enabled_changed {
                         last_emitted = sessions.clone();
                         publish(&state, sessions.clone());
@@ -74,6 +85,17 @@ pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicB
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Fire taskbar-flash + toast + chime for each ended session on the main thread
+/// (Windows window ops must not run off the UI thread).
+fn notify_ended(app: &AppHandle, ended: Vec<notify::EndedSession>) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        for session in &ended {
+            notify::notify_session_ended(&app, session);
+        }
+    });
 }
 
 /// Reconcile pet windows + tray tooltip on the main thread (window ops must not
