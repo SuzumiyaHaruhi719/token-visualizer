@@ -82,6 +82,10 @@ pub fn run() {
             let monitor_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 saved_settings.monitor_enabled,
             ));
+            // Live active-session count: written by the state-poll loop, read by
+            // the tray click to size the monitor popover to the session count.
+            let session_count =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             // --- resolve the built frontend dir ------------------------------
             let resource_dir = app.path().resource_dir().ok();
@@ -109,11 +113,18 @@ pub fn run() {
                 let state = state.clone();
                 let app_for_poll = handle.clone();
                 let pets_enabled_for_poll = pets_enabled.clone();
+                let session_count_for_poll = session_count.clone();
                 std::thread::Builder::new()
                     .name("cm-state-poll".into())
                     .spawn(move || {
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            state_poll::run(state, app_for_poll, port, pets_enabled_for_poll);
+                            state_poll::run(
+                                state,
+                                app_for_poll,
+                                port,
+                                pets_enabled_for_poll,
+                                session_count_for_poll,
+                            );
                         }))
                         .is_err()
                         {
@@ -131,7 +142,13 @@ pub fn run() {
             windows::create_dashboard(&handle, port)?;
             // Tray current-session popover: created hidden, toggled on tray click.
             windows::create_popover(&handle, port)?;
-            tray::build(&handle, port, pets_enabled.clone(), monitor_enabled.clone())?;
+            tray::build(
+                &handle,
+                port,
+                pets_enabled.clone(),
+                monitor_enabled.clone(),
+                session_count.clone(),
+            )?;
 
             Ok(())
         })

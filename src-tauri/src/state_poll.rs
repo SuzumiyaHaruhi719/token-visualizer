@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +42,13 @@ const ACTIVE_WINDOW_MS: i64 = 5 * 60 * 1000;
 ///
 /// `app` drives the desktop side effects (pet windows + tray tooltip), executed
 /// on the main thread. The broadcast + shared state are updated regardless.
-pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) {
+pub fn run(
+    state: AppState,
+    app: AppHandle,
+    port: u16,
+    pets_enabled: Arc<AtomicBool>,
+    session_count: Arc<AtomicUsize>,
+) {
     // Cache of session_id -> jsonl path so we don't re-walk the whole tree
     // every second. Paths are stable once discovered.
     let mut path_cache: HashMap<String, PathBuf> = HashMap::new();
@@ -66,6 +72,10 @@ pub fn run(state: AppState, app: AppHandle, port: u16, pets_enabled: Arc<AtomicB
                     if !ended.is_empty() {
                         notify_ended(&app, ended);
                     }
+
+                    // Publish the live count every tick so the tray click can
+                    // size the monitor popover to the active-session count.
+                    session_count.store(sessions.len(), Ordering::Relaxed);
 
                     if sessions != last_emitted || enabled_changed {
                         last_emitted = sessions.clone();
@@ -105,6 +115,8 @@ fn drive_desktop(app: &AppHandle, port: u16, sessions: Vec<SessionState>, pets_e
     let _ = app.clone().run_on_main_thread(move || {
         let current = sessions.first().cloned();
         windows::sync_pets(&app, port, &sessions, pets_enabled);
+        // Grow/shrink an OPEN monitor popover to match the live session count.
+        windows::resize_popover_if_visible(&app, sessions.len());
         tray::update_tooltip(&app, current.as_ref());
     });
 }

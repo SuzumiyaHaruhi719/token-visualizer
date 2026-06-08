@@ -22,11 +22,24 @@ pub const POPOVER_LABEL: &str = "popover";
 /// Prefix for per-session pet window labels (`pet-<sessionId>`).
 const PET_LABEL_PREFIX: &str = "pet-";
 
-/// Popover (tray current-session card) geometry.
+/// Popover (tray monitor) geometry. The popover stacks one card per active
+/// session; height grows with the card count. These MUST match the popover.css
+/// sizing contract: 6px outer padding, one 84px card per session, 8px gaps.
 const POPOVER_W: f64 = 260.0;
-const POPOVER_H: f64 = 150.0;
+const POPOVER_CARD_H: f64 = 84.0;
+const POPOVER_CARD_GAP: f64 = 8.0;
+const POPOVER_PAD: f64 = 6.0;
+/// Max session cards rendered/sized at once (matches the frontend `MAX_CARDS`).
+const POPOVER_MAX_CARDS: usize = 6;
 /// Gap kept between the popover and the screen's bottom-right corner (logical px).
 const POPOVER_MARGIN: f64 = 12.0;
+
+/// Logical popover height for `n` session cards, clamped to `1..=MAX`.
+/// `POPOVER_PAD + n*CARD_H + (n-1)*GAP + POPOVER_PAD`.
+fn popover_height(n: usize) -> f64 {
+    let n = n.clamp(1, POPOVER_MAX_CARDS) as f64;
+    POPOVER_PAD + n * POPOVER_CARD_H + (n - 1.0) * POPOVER_CARD_GAP + POPOVER_PAD
+}
 
 /// Soft cap on simultaneous pet windows (design §12.5).
 const MAX_PETS: usize = 8;
@@ -100,10 +113,10 @@ pub fn show_dashboard(app: &AppHandle, port: u16) {
     }
 }
 
-/// Logical bottom-right anchor for the popover on the primary monitor, leaving
-/// [`POPOVER_MARGIN`] from the right and bottom edges (above the tray). Falls
-/// back to a sane default when no monitor info is available.
-fn popover_position(app: &AppHandle) -> (f64, f64) {
+/// Logical bottom-right anchor for a popover of the given `height` on the
+/// primary monitor, leaving [`POPOVER_MARGIN`] from the right and bottom edges
+/// (above the tray). Falls back to a sane default when no monitor info exists.
+fn popover_position(app: &AppHandle, height: f64) -> (f64, f64) {
     if let Ok(Some(mon)) = app.primary_monitor() {
         let scale = mon.scale_factor();
         let size = mon.size();
@@ -115,7 +128,7 @@ fn popover_position(app: &AppHandle) -> (f64, f64) {
         let mon_w = size.width as f64 / scale;
         let mon_h = size.height as f64 / scale;
         let x = mon_x + mon_w - POPOVER_W - POPOVER_MARGIN;
-        let y = mon_y + mon_h - POPOVER_H - POPOVER_MARGIN;
+        let y = mon_y + mon_h - height - POPOVER_MARGIN;
         return (x.max(mon_x), y.max(mon_y));
     }
     (POPOVER_MARGIN, POPOVER_MARGIN)
@@ -128,14 +141,15 @@ pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
     if app.get_webview_window(POPOVER_LABEL).is_some() {
         return Ok(());
     }
-    let (x, y) = popover_position(app);
+    let height = popover_height(1);
+    let (x, y) = popover_position(app, height);
     WebviewWindowBuilder::new(
         app,
         POPOVER_LABEL,
         WebviewUrl::External(server_url(port, "/popover.html")),
     )
     .title("Current Session")
-    .inner_size(POPOVER_W, POPOVER_H)
+    .inner_size(POPOVER_W, height)
     .position(x, y)
     .resizable(false)
     .decorations(false)
@@ -150,29 +164,58 @@ pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Toggle the tray current-session popover: if it exists and is visible, save
-/// its position and hide it; otherwise (re)create it, restore the user's saved
-/// position (or anchor bottom-right), show + focus. Called from the tray's
-/// LEFT-click handler.
-pub fn toggle_popover(app: &AppHandle, port: u16) {
+/// Toggle the tray monitor popover: if it exists and is visible, save its
+/// position and hide it; otherwise (re)create it, size it to `session_count`
+/// active-session cards, restore the saved position (or anchor bottom-right),
+/// show + focus. Called from the tray's LEFT-click handler.
+pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {
             save_popover_position(&win);
             let _ = win.hide();
             return;
         }
-        position_popover(app, &win);
+        fit_popover(app, &win, session_count);
         let _ = win.show();
         let _ = win.set_focus();
         return;
     }
     if create_popover(app, port).is_ok() {
         if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
-            position_popover(app, &win);
+            fit_popover(app, &win, session_count);
             let _ = win.show();
             let _ = win.set_focus();
         }
     }
+}
+
+/// Live-resize the popover to `session_count` cards, but only while it is
+/// already visible (so a new chat starting grows it without popping it open),
+/// and only when the height actually changed (so per-tick state updates never
+/// yank a window the user may be dragging). Called from the state-poll loop.
+pub fn resize_popover_if_visible(app: &AppHandle, session_count: usize) {
+    let Some(win) = app.get_webview_window(POPOVER_LABEL) else {
+        return;
+    };
+    if !win.is_visible().unwrap_or(false) {
+        return;
+    }
+    let desired = popover_height(session_count);
+    let scale = win.scale_factor().unwrap_or(1.0);
+    if let Ok(sz) = win.inner_size() {
+        let current = sz.height as f64 / scale;
+        if (current - desired).abs() <= 1.0 {
+            return; // unchanged — leave it (and the user's drag) alone
+        }
+    }
+    fit_popover(app, &win, session_count);
+}
+
+/// Resize the popover to fit `session_count` cards and (re)position it.
+fn fit_popover(app: &AppHandle, win: &WebviewWindow, session_count: usize) {
+    let height = popover_height(session_count);
+    let _ = win.set_size(tauri::LogicalSize::new(POPOVER_W, height));
+    position_popover(app, win, height);
 }
 
 /// Hide the popover if it is currently visible (used when the monitor toggle is
@@ -187,8 +230,9 @@ pub fn hide_popover(app: &AppHandle) {
 }
 
 /// Place the popover at the user's saved drag position if it is on a connected
-/// monitor; otherwise anchor it to the primary monitor's bottom-right corner.
-fn position_popover(app: &AppHandle, win: &WebviewWindow) {
+/// monitor; otherwise anchor it to the primary monitor's bottom-right corner
+/// using `height` (so a taller multi-session popover still sits above the tray).
+fn position_popover(app: &AppHandle, win: &WebviewWindow, height: f64) {
     let saved = settings::load();
     if let (Some(x), Some(y)) = (saved.popover_x, saved.popover_y) {
         if position_on_some_monitor(app, x, y) {
@@ -198,7 +242,7 @@ fn position_popover(app: &AppHandle, win: &WebviewWindow) {
         // Saved spot is off-screen now (e.g. a monitor was unplugged) — fall
         // through to the safe bottom-right anchor so the popover is reachable.
     }
-    let (x, y) = popover_position(app);
+    let (x, y) = popover_position(app, height);
     let _ = win.set_position(tauri::LogicalPosition::new(x, y));
 }
 
@@ -331,5 +375,16 @@ mod tests {
     #[test]
     fn encode_session_escapes_unsafe() {
         assert_eq!(encode_session("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn popover_height_matches_card_contract() {
+        // 6 pad + 1*84 + 0 gap + 6 pad
+        assert_eq!(popover_height(1), 96.0);
+        // 6 + 3*84 + 2*8 + 6 = 280
+        assert_eq!(popover_height(3), 280.0);
+        // 0 clamps up to 1 card; > MAX clamps down to MAX (6).
+        assert_eq!(popover_height(0), popover_height(1));
+        assert_eq!(popover_height(99), popover_height(POPOVER_MAX_CARDS));
     }
 }

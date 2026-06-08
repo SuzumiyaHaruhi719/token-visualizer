@@ -4,7 +4,7 @@
 //! (exits the app). The tooltip reflects the most-recently-active session and
 //! is refreshed best-effort from the state-poll loop via [`update_tooltip`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cmcore::model::SessionState;
@@ -35,6 +35,7 @@ pub fn build(
     port: u16,
     pets_enabled: Arc<AtomicBool>,
     monitor_enabled: Arc<AtomicBool>,
+    session_count: Arc<AtomicUsize>,
 ) -> tauri::Result<TrayIcon> {
     let open_item = MenuItem::with_id(app, ID_OPEN, "Open Dashboard", true, None::<&str>)?;
     let pets_item = CheckMenuItem::with_id(
@@ -112,7 +113,8 @@ pub fn build(
                 }
             ) && monitor_enabled.load(Ordering::Relaxed)
             {
-                windows::toggle_popover(tray.app_handle(), port);
+                let count = session_count.load(Ordering::Relaxed);
+                windows::toggle_popover(tray.app_handle(), port, count);
             }
         });
 
