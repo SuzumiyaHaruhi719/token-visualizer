@@ -56,6 +56,7 @@ pub fn run(
     let mut path_cache: HashMap<String, PathBuf> = HashMap::new();
     let mut last_emitted: Vec<SessionState> = Vec::new();
     let mut last_enabled = pets_enabled.load(Ordering::Relaxed);
+    let mut last_monitor = state.runtime.monitor_enabled.load(Ordering::Relaxed);
     // Tracks the live-session set across ticks to fire session-end notifications.
     let mut end_tracker = SessionEndTracker::new();
 
@@ -63,6 +64,18 @@ pub fn run(
         let enabled = pets_enabled.load(Ordering::Relaxed);
         let enabled_changed = enabled != last_enabled;
         last_enabled = enabled;
+
+        // When the monitor is switched OFF (settings panel flips the atomic),
+        // hide any open popover immediately — the API runs off the main thread,
+        // so the hide must happen here, on the main thread.
+        let monitor = state.runtime.monitor_enabled.load(Ordering::Relaxed);
+        if !monitor && last_monitor {
+            let app_for_hide = app.clone();
+            let _ = app.clone().run_on_main_thread(move || {
+                windows::hide_popover(&app_for_hide);
+            });
+        }
+        last_monitor = monitor;
 
         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match poll_once(&state, &mut path_cache) {

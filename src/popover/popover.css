@@ -14,7 +14,11 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: transparent; /* frameless transparent window */
+  /* OPAQUE dark surface. The popover window is NOT transparent: WebView2
+     transparent windows render an ugly black box around the rounded content on
+     Windows. A solid dark fill (matching the dashboard panels) avoids that; the
+     OS rounds the frameless window's corners. */
+  background: #0e1118;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;

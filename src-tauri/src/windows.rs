@@ -153,10 +153,13 @@ pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
     .position(x, y)
     .resizable(false)
     .decorations(false)
-    .transparent(true)
+    // Opaque (NOT transparent): WebView2 transparent windows render a black box
+    // around the content on Windows. The page paints its own dark surface; the
+    // OS rounds the frameless window. shadow(true) gives it a floating feel.
+    .transparent(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .shadow(false)
+    .shadow(true)
     .visible(false) // tray-first: created hidden, shown on tray click
     .focused(false)
     .initialization_script(port_init_script(port))
@@ -177,6 +180,7 @@ pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
         }
         fit_popover(app, &win, session_count);
         let _ = win.show();
+        let _ = win.set_always_on_top(true); // re-assert so it stays on top
         let _ = win.set_focus();
         return;
     }
@@ -184,6 +188,7 @@ pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
         if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
             fit_popover(app, &win, session_count);
             let _ = win.show();
+            let _ = win.set_always_on_top(true);
             let _ = win.set_focus();
         }
     }
@@ -219,11 +224,9 @@ fn fit_popover(app: &AppHandle, win: &WebviewWindow, session_count: usize) {
 }
 
 /// Hide the popover if it is currently visible. Saves the position first so
-/// re-enabling restores it. Retained for the toggle-off path: the monitor toggle
-/// now lives in the settings panel (it flips the shared atomic, which the tray
-/// left-click already respects), so an open popover simply won't reopen — this
-/// helper stays available for an immediate-hide wiring if desired later.
-#[allow(dead_code)]
+/// re-enabling restores it. Called by the state-poll loop when the monitor is
+/// switched off in the settings panel (the API flips the shared atomic; the
+/// poll loop performs the actual hide on the main thread).
 pub fn hide_popover(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {
