@@ -208,8 +208,9 @@ fn timeseries_daily_buckets() {
     let s = seeded_store();
     let sum = summary(&s, "all").unwrap();
     assert_eq!(sum.timeseries.len(), 2, "two distinct days");
-    assert_eq!(sum.timeseries[0].bucket, "2026-06-05");
-    assert_eq!(sum.timeseries[1].bucket, "2026-06-06");
+    // Daily buckets are emitted as ISO-8601 UTC midnight (for `new Date(...)`).
+    assert_eq!(sum.timeseries[0].bucket, "2026-06-05T00:00:00Z");
+    assert_eq!(sum.timeseries[1].bucket, "2026-06-06T00:00:00Z");
     // Day 1 input = 100 + 200 = 300; Day 2 input = 300.
     assert_eq!(sum.timeseries[0].input, 300);
     assert_eq!(sum.timeseries[0].cache_read, 80);

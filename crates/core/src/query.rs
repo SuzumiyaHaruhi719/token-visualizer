@@ -103,7 +103,7 @@ pub fn summary_with(
     let by_model = query_by_model(store, start, prices)?;
     let by_project = query_by_project(store, start)?;
     let by_source = query_by_source(store, start, prices)?;
-    let timeseries = query_timeseries(store, start)?;
+    let timeseries = query_timeseries(store, start, range)?;
 
     // Total cost = sum of priced per-model costs. Unknown models remain `None`
     // in `by_model`, but do not wipe out the total if other models are priced.
@@ -301,15 +301,23 @@ fn query_by_project(store: &Store, start: Option<i64>) -> Result<Vec<ProjectBrea
     Ok(rows)
 }
 
-fn query_timeseries(store: &Store, start: Option<i64>) -> Result<Vec<TimeseriesBucket>> {
+fn query_timeseries(store: &Store, start: Option<i64>, range: &str) -> Result<Vec<TimeseriesBucket>> {
     let where_clause = if start.is_some() {
         "WHERE ts >= ?1"
     } else {
         ""
     };
-    // Convert epoch millis -> UTC date string for daily bucketing.
+    // Bucket granularity depends on the range: "today" is bucketed by HOUR so the
+    // chart shows the intraday usage curve (a single daily bucket renders as one
+    // ugly block); every other range stays daily. Buckets are emitted as ISO-8601
+    // UTC strings the frontend parses with `new Date(...)`.
+    let bucket_expr = if range == "today" {
+        "strftime('%Y-%m-%dT%H:00:00Z', ts/1000, 'unixepoch')"
+    } else {
+        "strftime('%Y-%m-%dT00:00:00Z', ts/1000, 'unixepoch')"
+    };
     let sql = format!(
-        "SELECT date(ts/1000, 'unixepoch') AS bucket, \
+        "SELECT {bucket_expr} AS bucket, \
                 COALESCE(SUM(input),0), COALESCE(SUM(output),0), \
                 COALESCE(SUM(cache_create),0), COALESCE(SUM(cache_read),0) \
          FROM events {where_clause} \
