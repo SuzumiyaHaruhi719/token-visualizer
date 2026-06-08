@@ -2,9 +2,15 @@
 // next over a short duration using requestAnimationFrame + easeOutCubic.
 //
 // Each call cancels any in-flight tween on the same element, so rapid updates
-// retarget smoothly instead of stacking. A `prefers-reduced-motion` guard snaps
-// instantly. Callers supply a `format(v)` callback so the tween renders tokens,
-// costs, percentages, etc. with the correct formatter on every frame.
+// retarget smoothly instead of stacking. Callers supply a `format(v)` callback
+// so the tween renders tokens, costs, percentages, etc. with the correct
+// formatter on every frame.
+//
+// NOTE: we deliberately do NOT honor `prefers-reduced-motion` here. On Windows
+// with "animation effects" disabled, WebView2 reports reduced motion, which
+// would otherwise snap every count instantly — the user wants the silky tick
+// regardless of that OS setting. Each frame mutates textContent, which forces
+// WebView2 to repaint, so this animates in the real app.
 
 const DEFAULT_DURATION_MS = 700;
 
@@ -21,14 +27,6 @@ function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - clamped, 3);
 }
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
-
 // Per-element handle to the active animation frame so a new tween can cancel it.
 const activeFrames = new WeakMap<HTMLElement, number>();
 
@@ -42,8 +40,9 @@ function cancelActive(el: HTMLElement): void {
 
 /**
  * Tween `el.textContent` from `from` to `to`, formatting each frame.
- * Cancels any previous tween on the same element. Snaps instantly when
- * reduced motion is requested or rAF is unavailable (e.g. jsdom/tests).
+ * Cancels any previous tween on the same element. Snaps instantly when the
+ * value is unchanged or rAF is unavailable (the latter keeps test envs
+ * deterministic).
  */
 export function animateNumber(
   el: HTMLElement,
@@ -57,11 +56,7 @@ export function animateNumber(
   const start = Number.isFinite(from) ? from : 0;
   const end = Number.isFinite(to) ? to : 0;
 
-  if (
-    start === end ||
-    prefersReducedMotion() ||
-    typeof requestAnimationFrame !== "function"
-  ) {
+  if (start === end || typeof requestAnimationFrame !== "function") {
     el.textContent = format(end);
     return;
   }

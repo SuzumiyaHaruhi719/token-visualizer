@@ -20,11 +20,18 @@ body {
   -webkit-user-select: none;
 }
 
+/* WINDOW-SIZING CONTRACT — the Rust side sizes the window to match these
+   constants, so do NOT change them without flagging it: 6px padding, one 84px
+   card per session, 8px gap between cards. Content height for N cards =
+   6 + N*84 + (N-1)*8 + 6. Up to 6 cards render. */
 #popover {
   box-sizing: border-box;
   width: 100%;
   height: 100%;
   padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   cursor: grab; /* draggable: data-tauri-drag-region is on this element */
 }
 #popover:active {
@@ -40,11 +47,12 @@ body {
 .pop-card {
   box-sizing: border-box;
   width: 100%;
-  height: 100%;
+  height: 84px;     /* fixed — the Rust window height depends on this */
+  flex: 0 0 84px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 13px 15px;
+  gap: 6px;
+  padding: 11px 15px;
   border-radius: 16px;
   background: linear-gradient(160deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04));
   -webkit-backdrop-filter: blur(30px) saturate(170%);
@@ -92,11 +100,8 @@ body {
   text-transform: uppercase; letter-spacing: 0.06em;
 }
 
-/* "today's cost" footer line */
-.pop-foot { margin-top: auto; font-size: 11px; color: var(--pop-muted); }
-.pop-foot strong { color: var(--teal); font-weight: 650; }
-
-/* Empty state */
+/* Empty state — a single 84px card with centered text. */
+.pop-empty-card { justify-content: center; gap: 0; }
 .pop-empty {
   display: flex; align-items: center; justify-content: center;
   width: 100%; height: 100%; font-size: 13px; color: var(--pop-muted);

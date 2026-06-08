@@ -19,6 +19,7 @@ vi.mock("./lib/api", () => ({
     timeseries: null,
   })),
   getCurrent: vi.fn(async () => null),
+  getSessions: vi.fn(async () => []),
   getLimits: vi.fn(async () => ({
     claude: { session: null, fiveHour: null, weekly: null, note: "remaining not exposed locally" },
     codex: { session: null, fiveHour: null, weekly: null, planType: null },

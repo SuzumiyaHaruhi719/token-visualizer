@@ -3,7 +3,7 @@
 
 import * as echarts from "echarts";
 import "./styles.css";
-import { getSummary, getCurrent, getLimits, subscribe } from "./lib/api";
+import { getSummary, getSessions, getLimits, subscribe } from "./lib/api";
 import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
 import { animateNumber } from "./lib/tween";
 import { renderLimits, tickCountdowns } from "./components/limits";
@@ -372,26 +372,72 @@ function renderCachePanel(s: Summary): void {
   el("cache-fresh").textContent = formatTokens(t.input);
 }
 
-function renderCurrent(session: SessionState | null): void {
+// Last token value rendered into each session card's count, keyed by session id,
+// so live updates tween from the prior value instead of snapping or restarting.
+const lastSessionTokens = new Map<string, number>();
+
+function stateLabelFor(state: SessionState["state"]): string {
+  return state.kind === "working" && state.tool
+    ? `working · ${state.tool}`
+    : state.kind;
+}
+
+function sessionRowMarkup(session: SessionState): string {
+  return `
+    <div class="cs-row" data-session="${escapeHtml(session.sessionId)}">
+      <span class="cs-dot cs-${session.state.kind}"></span>
+      <span class="cs-project">${escapeHtml(session.project)}</span>
+      <span class="cs-sep">·</span>
+      <span class="cs-model">${escapeHtml(session.model.replace("claude-", ""))}</span>
+      <span class="cs-sep">·</span>
+      <span class="cs-tokens" data-session="${escapeHtml(session.sessionId)}">${formatTokens(session.tokens)} tok</span>
+      <span class="cs-sep">·</span>
+      <span class="cs-state">${escapeHtml(stateLabelFor(session.state))}</span>
+    </div>`;
+}
+
+/**
+ * Render ONE strip-row per active session (wrapped, no scrollbar). Empty state
+ * is preserved when there are none. Token counts tween from their prior value.
+ */
+function renderSessions(sessions: SessionState[]): void {
   const strip = el("current-strip");
-  if (!session) {
+  if (!sessions.length) {
+    lastSessionTokens.clear();
     strip.innerHTML = `<span class="cs-empty">No active session</span>`;
     return;
   }
-  const stateLabel =
-    session.state.kind === "working" && session.state.tool
-      ? `working · ${session.state.tool}`
-      : session.state.kind;
-  strip.innerHTML = `
-    <span class="cs-dot cs-${session.state.kind}"></span>
-    <span class="cs-project">${escapeHtml(session.project)}</span>
-    <span class="cs-sep">·</span>
-    <span class="cs-model">${escapeHtml(session.model.replace("claude-", ""))}</span>
-    <span class="cs-sep">·</span>
-    <span class="cs-tokens">${formatTokens(session.tokens)} tok</span>
-    <span class="cs-sep">·</span>
-    <span class="cs-state">${escapeHtml(stateLabel)}</span>
-  `;
+
+  strip.innerHTML = sessions.map(sessionRowMarkup).join("");
+
+  // Tween each card's token count from its remembered value (count up from 0
+  // on first appearance), and drop ids that are no longer active.
+  const live = new Set(sessions.map((s) => s.sessionId));
+  for (const id of [...lastSessionTokens.keys()]) {
+    if (!live.has(id)) lastSessionTokens.delete(id);
+  }
+  for (const s of sessions) {
+    const node = strip.querySelector<HTMLElement>(
+      `.cs-tokens[data-session="${cssAttrEscape(s.sessionId)}"]`,
+    );
+    if (!node) continue;
+    const from = lastSessionTokens.get(s.sessionId) ?? 0;
+    lastSessionTokens.set(s.sessionId, s.tokens);
+    animateNumber(node, from, s.tokens, { format: (v) => `${formatTokens(v)} tok` });
+  }
+}
+
+/** Escape a session id for use inside a CSS attribute selector. */
+function cssAttrEscape(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+/**
+ * Back-compat single-session entry point: renders the given session (or the
+ * empty state) by delegating to the multi-session renderer.
+ */
+function renderCurrent(session: SessionState | null): void {
+  renderSessions(session ? [session] : []);
 }
 
 function escapeHtml(s: string): string {
@@ -442,8 +488,12 @@ async function refreshLimits(): Promise<void> {
 }
 
 // Debounce live summary refreshes so a burst of SSE frames coalesces into one
-// fetch (~400ms), keeping the KPI tweens smooth instead of thrashing.
-const SUMMARY_DEBOUNCE_MS = 400;
+// fetch. Kept tiny (~next tick) so the KPI row + token ticker update the
+// instant new token data lands — just enough to coalesce a burst, not enough
+// to feel laggy. Data-granularity reality: Claude records token usage once per
+// completed assistant message, so the totals STEP per-message; the tween then
+// glides between those steps to feel continuous.
+const SUMMARY_DEBOUNCE_MS = 70;
 let summaryDebounce: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleSummaryRefresh(): void {
@@ -456,8 +506,12 @@ function scheduleSummaryRefresh(): void {
 }
 
 function handleEvent(ev: CmServerEvent): void {
-  if (ev.type === "usage") {
-    renderCurrent(ev.data.current);
+  if (ev.type === "sessions") {
+    // Authoritative live list: one card per active session.
+    renderSessions(ev.data);
+  } else if (ev.type === "usage") {
+    // A single session changed — refresh the KPI row + token ticker (which the
+    // summary feeds). The strip itself is driven by the `sessions` event above.
     scheduleSummaryRefresh();
   } else if (ev.type === "import") {
     const bar = el("import-bar");
@@ -487,8 +541,7 @@ async function bootstrap(): Promise<void> {
   });
 
   await loadRange(currentRange);
-  const initial = await getCurrent();
-  renderCurrent(initial);
+  renderSessions(await getSessions());
   await refreshLimits();
 
   // Tick the reset countdowns once per second without re-rendering markup.
@@ -516,4 +569,4 @@ if (typeof document !== "undefined") {
   }
 }
 
-export { loadRange, handleEvent, renderCurrent, bootstrap, normalizeSummary };
+export { loadRange, handleEvent, renderCurrent, renderSessions, bootstrap, normalizeSummary };
