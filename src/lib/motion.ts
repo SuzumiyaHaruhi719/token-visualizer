@@ -1,5 +1,5 @@
-const HEIGHT_TRANSITION_MS = 320;
-const HEIGHT_CLEANUP_MS = HEIGHT_TRANSITION_MS + 80;
+const HEIGHT_TRANSITION_MS = 360;
+const HEIGHT_CLEANUP_MS = HEIGHT_TRANSITION_MS + 100;
 
 /** Run one DOM replacement while animating the container's old height to the new height. */
 export function animateHeightChange(container: HTMLElement, mutate: () => void): void {

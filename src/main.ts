@@ -14,7 +14,7 @@ import {
 import { createSettingsPanel } from "./components/settings-panel";
 import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
 import { animateNumber } from "./lib/tween";
-import { animateHeightChange } from "./lib/motion";
+import { animateHeightChange, revealOnNextFrame } from "./lib/motion";
 import { renderLimits, tickCountdowns } from "./components/limits";
 import { renderBySource } from "./components/by-source";
 import { renderTokenTicker, updateTokenTicker } from "./components/token-ticker";
@@ -42,6 +42,19 @@ const COLORS = {
   cacheRead: "#5bc0a8",
   axis: "#3a3a3a",
   label: "#9a9a9a",
+};
+
+const CHART_MOTION = {
+  animationDuration: 700,
+  animationDurationUpdate: 520,
+  animationEasing: "cubicInOut",
+  animationEasingUpdate: "cubicInOut",
+} as const;
+
+type DonutTooltipParam = {
+  name: string;
+  value: number | string;
+  percent: number;
 };
 
 type Charts = {
@@ -290,6 +303,7 @@ function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
 
   chart.setOption(
     {
+      ...CHART_MOTION,
       backgroundColor: "transparent",
       tooltip: {
         trigger: "axis",
@@ -327,10 +341,14 @@ function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
 function renderDonut(chart: echarts.ECharts, s: Summary): void {
   const palette = ["#da7757", "#7c93c3", "#5bc0a8", "#e0a96d", "#b07cc3"];
   chart.setOption({
+    ...CHART_MOTION,
     backgroundColor: "transparent",
     tooltip: {
       trigger: "item",
-      formatter: (p: any) => `${p.name}<br/>${formatTokens(p.value)} (${p.percent}%)`,
+      formatter: (p: DonutTooltipParam) => {
+        const value = typeof p.value === "number" ? p.value : Number(p.value);
+        return `${p.name}<br/>${formatTokens(value)} (${p.percent}%)`;
+      },
     },
     legend: { bottom: 0, textStyle: { color: COLORS.label } },
     series: [
@@ -354,6 +372,7 @@ function renderDonut(chart: echarts.ECharts, s: Summary): void {
 function renderProjects(chart: echarts.ECharts, s: Summary): void {
   const sorted = [...s.byProject].sort((a, b) => a.tokens - b.tokens).slice(-8);
   chart.setOption({
+    ...CHART_MOTION,
     backgroundColor: "transparent",
     tooltip: {
       trigger: "axis",
@@ -457,9 +476,9 @@ function stateLabelFor(state: SessionState["state"]): string {
     : state.kind;
 }
 
-function sessionRowMarkup(session: SessionState): string {
+function sessionRowMarkup(session: SessionState, entering: boolean): string {
   return `
-    <div class="cs-row" data-session="${escapeHtml(session.sessionId)}">
+    <div class="cs-row${entering ? " ui-enter" : ""}" data-session="${escapeHtml(session.sessionId)}">
       <span class="cs-dot cs-${session.state.kind}"></span>
       <span class="cs-project">${escapeHtml(session.project)}</span>
       <span class="cs-sep">·</span>
@@ -477,6 +496,7 @@ function sessionRowMarkup(session: SessionState): string {
  */
 function renderSessions(sessions: SessionState[]): void {
   const strip = el("current-strip");
+  const previousIds = new Set(lastSessionTokens.keys());
   // Smoothly transition the strip's height when rows are added/removed (FLIP);
   // a no-op when the height is unchanged (the common per-tick re-render).
   animateHeightChange(strip, () => {
@@ -486,7 +506,9 @@ function renderSessions(sessions: SessionState[]): void {
       return;
     }
 
-    strip.innerHTML = sessions.map(sessionRowMarkup).join("");
+    strip.innerHTML = sessions
+      .map((session) => sessionRowMarkup(session, !previousIds.has(session.sessionId)))
+      .join("");
 
     // Tween each card's token count from its remembered value (count up from 0
     // on first appearance), and drop ids that are no longer active.
@@ -503,6 +525,9 @@ function renderSessions(sessions: SessionState[]): void {
       lastSessionTokens.set(s.sessionId, s.tokens);
       animateNumber(node, from, s.tokens, { format: (v) => `${formatTokens(v)} tok` });
     }
+    strip.querySelectorAll(".cs-row.ui-enter").forEach((row) => {
+      revealOnNextFrame(row, "ui-enter");
+    });
   });
 }
 
@@ -679,7 +704,8 @@ let lastLimits: Limits | null = null;
 async function refreshLimits(): Promise<void> {
   const limits = await getLimits();
   lastLimits = limits;
-  renderLimits(el("limits-body"), limits);
+  const body = el("limits-body");
+  animateHeightChange(body, () => renderLimits(body, limits));
 }
 
 // Debounce live summary refreshes so a burst of SSE frames coalesces into one

@@ -25,11 +25,12 @@
   --radius: 16px;
   --gap: 18px;
   --blur: blur(26px) saturate(165%);
-  --ease-premium: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-premium: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-premium-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-premium-pop: cubic-bezier(0.2, 0.9, 0.22, 1);
-  --dur-fast: 180ms;
-  --dur-med: 280ms;
-  --dur-slow: 420ms;
+  --dur-fast: 160ms;
+  --dur-med: 320ms;
+  --dur-slow: 520ms;
 
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
@@ -130,9 +131,9 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.45);
   pointer-events: none;
   transition:
-    transform 0.42s cubic-bezier(0.34, 1.25, 0.4, 1),
-    width 0.42s cubic-bezier(0.34, 1.25, 0.4, 1),
-    height 0.42s ease;
+    transform var(--dur-slow) var(--ease-premium-pop),
+    width var(--dur-slow) var(--ease-premium-pop),
+    height var(--dur-slow) var(--ease-premium);
 }
 .range-tab {
   position: relative; /* sit above the indicator */
@@ -146,7 +147,9 @@ body {
   padding: 7px 16px;
   border-radius: 9px;
   cursor: pointer;
-  transition: color 0.25s ease, transform 0.1s;
+  transition:
+    color var(--dur-fast) var(--ease-premium-out),
+    transform var(--dur-fast) var(--ease-premium);
 }
 .range-tab:hover { color: var(--text); }
 .range-tab:active { transform: translateY(1px); }
@@ -188,7 +191,7 @@ body {
   width: 0%;
   background: linear-gradient(90deg, var(--accent-deep), var(--gold));
   box-shadow: 0 0 18px rgba(255, 138, 92, 0.55);
-  transition: width 0.3s ease;
+  transition: width var(--dur-med) var(--ease-premium);
 }
 .import-text {
   position: absolute; inset: 0;
@@ -207,7 +210,10 @@ body {
   padding: 18px 20px;
   position: relative;
   overflow: hidden;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s;
+  transition:
+    transform var(--dur-fast) var(--ease-premium-out),
+    box-shadow var(--dur-fast) var(--ease-premium-out),
+    border-color var(--dur-fast) var(--ease-premium-out);
 }
 .kpi::after { /* subtle corner sheen */
   content: "";
@@ -262,6 +268,19 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--gap);
+}
+
+.ui-enter {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.bysource-bar,
+.bysource-chips,
+.bysource-empty,
+.cs-row {
+  transition:
+    opacity var(--dur-med) var(--ease-premium-out),
+    transform var(--dur-med) var(--ease-premium-pop);
 }
 
 /* Cache panel ------------------------------------------------------------ */
@@ -343,7 +362,7 @@ body {
   background: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 0 0 1px var(--glass-border);
 }
-.bysource-seg { height: 100%; transition: width 0.4s ease; }
+.bysource-seg { height: 100%; transition: width var(--dur-slow) var(--ease-premium); }
 .bysource-seg.bysource-claude {
   background: linear-gradient(90deg, var(--accent), var(--accent-deep));
 }
@@ -358,7 +377,9 @@ body {
   font-size: 0.8rem;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+  transition: opacity var(--dur-med) var(--ease-premium-out);
 }
+.bysource-chip-muted { opacity: 0.48; }
 .bysource-swatch {
   width: 9px; height: 9px; border-radius: 3px; display: inline-block;
 }
@@ -599,7 +620,7 @@ body {
   border-radius: 6px;
   background: linear-gradient(90deg, var(--accent), var(--gold));
   box-shadow: 0 0 12px rgba(255, 138, 92, 0.55);
-  transition: width 0.5s ease;
+  transition: width var(--dur-slow) var(--ease-premium);
 }
 .limit-reset {
   margin-top: 5px;
@@ -635,7 +656,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.18s, background 0.18s, transform 0.25s, box-shadow 0.18s;
+  transition:
+    color var(--dur-fast) var(--ease-premium-out),
+    background var(--dur-fast) var(--ease-premium-out),
+    transform var(--dur-med) var(--ease-premium-pop),
+    box-shadow var(--dur-fast) var(--ease-premium-out);
 }
 .settings-gear:hover {
   color: var(--accent);
@@ -655,7 +680,7 @@ body {
   background: rgba(4, 5, 9, 0.55);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
-  animation: settings-fade 0.16s ease;
+  animation: settings-fade var(--dur-fast) var(--ease-premium-out);
 }
 @keyframes settings-fade {
   from { opacity: 0; }
@@ -672,7 +697,7 @@ body {
     inset 0 1px 0 var(--glass-hi),
     0 24px 60px rgba(0, 0, 0, 0.55);
   padding: 20px 22px 22px;
-  animation: settings-rise 0.18s ease;
+  animation: settings-rise var(--dur-med) var(--ease-premium-pop);
 }
 @keyframes settings-rise {
   from { transform: translateY(10px); opacity: 0; }
@@ -698,7 +723,9 @@ body {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color var(--dur-fast) var(--ease-premium-out),
+    background var(--dur-fast) var(--ease-premium-out);
 }
 .settings-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
 
@@ -746,7 +773,7 @@ body {
   background: rgba(255, 255, 255, 0.10);
   box-shadow: inset 0 0 0 1px var(--glass-border);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--dur-med) var(--ease-premium);
   flex: none;
 }
 .settings-toggle::after {
@@ -759,7 +786,7 @@ body {
   border-radius: 50%;
   background: #f3f4f8;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  transition: transform 0.2s;
+  transition: transform var(--dur-med) var(--ease-premium-pop);
 }
 .settings-toggle:checked {
   background: linear-gradient(180deg, #ffa074, var(--accent-deep));

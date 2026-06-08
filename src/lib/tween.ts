@@ -1,5 +1,5 @@
 // Silky number-tick animation: tween an element's text from one value to the
-// next over a short duration using requestAnimationFrame + easeOutCubic.
+// next over a short duration using requestAnimationFrame + easeInOutCubic.
 //
 // Each call cancels any in-flight tween on the same element, so rapid updates
 // retarget smoothly instead of stacking. Callers supply a `format(v)` callback
@@ -12,19 +12,21 @@
 // regardless of that OS setting. Each frame mutates textContent, which forces
 // WebView2 to repaint, so this animates in the real app.
 
-const DEFAULT_DURATION_MS = 700;
+const DEFAULT_DURATION_MS = 650;
 
 export interface AnimateNumberOptions {
-  /** How long the tween runs, in ms. Defaults to ~700ms. */
+  /** How long the tween runs, in ms. Defaults to ~650ms. */
   durationMs?: number;
   /** Maps the in-flight numeric value to display text each frame. */
   format: (value: number) => string;
 }
 
-/** Cubic ease-out: fast start, gentle settle. */
-function easeOutCubic(t: number): number {
+/** Cubic ease-in-out: measured start, smooth settle. */
+function easeInOutCubic(t: number): number {
   const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
-  return 1 - Math.pow(1 - clamped, 3);
+  return clamped < 0.5
+    ? 4 * clamped * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
 }
 
 // Per-element handle to the active animation frame so a new tween can cancel it.
@@ -69,7 +71,7 @@ export function animateNumber(
     if (startTime === null) startTime = now;
     const elapsed = now - startTime;
     const progress = duration > 0 ? elapsed / duration : 1;
-    const eased = easeOutCubic(progress);
+    const eased = easeInOutCubic(progress);
     const value = start + delta * eased;
     el.textContent = format(value);
 

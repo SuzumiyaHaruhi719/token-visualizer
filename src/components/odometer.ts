@@ -3,14 +3,14 @@
 //   - reels  (opts.reels): a slot-machine vertical digit roll — each digit is a
 //     vertical strip of 0-9 that rolls; used for the big total.
 //
-// Both modes share ONE driver: the displayed value eases toward the latest
-// target on a slow exponential approach (time-constant TAU_MS), so a single
+// Live updates share one slow driver: the displayed value eases toward the latest
+// target on an exponential approach (time-constant TAU_MS), so a single
 // update keeps rolling for a few seconds. Token totals only change when a message
 // completes (every few seconds), so the slow roll means each change is still
 // rolling when the next arrives — the number rolls continuously during active
-// use instead of snapping and freezing. The lag does not matter (the user wants
-// the motion). A downward target snaps (range switch to a smaller total). We
-// deliberately do NOT honor `prefers-reduced-motion` (the roll is the point).
+// use instead of snapping and freezing. Tab switches use a fixed-duration
+// bidirectional transition. We deliberately do NOT honor `prefers-reduced-motion`
+// (the roll is the point).
 //
 // Reels-mode notes (lessons from earlier iterations):
 //   - The UNITS reel rolls continuously; higher reels sit on their exact integer
@@ -24,12 +24,10 @@
 import { formatInt } from "../lib/format";
 
 // Driver tuning. TAU_MS is the SLOW continuous roll for live increments (keeps
-// rolling for seconds). TAU_FAST is the quick transition used on a tab switch,
-// so the number rolls smoothly (and bidirectionally) to the new range's total
-// in ~1s instead of snapping — a seamless hand-off, no stop.
+// rolling for seconds). Tab switches use a separate fixed-duration lerp, so a
+// 100-token move and a 10B-token move have the same wall-clock hand-off.
 const TAU_MS = 2000;
-const TAU_FAST_MS = 320;
-const FAST_WINDOW_MS = 1300; // how long a tab-switch transition stays fast
+const TRANSITION_MS = 800;
 const MIN_UNITS_PER_SEC = 8;
 const CONVERGE_EPSILON = 1;
 const NOMINAL_FRAME_MS = 16.6667;
@@ -56,7 +54,7 @@ export interface OdometerHandle {
   snapTo(n: number): void;
   /** Alias of snapTo, for callers that want a non-rolling set. */
   setValue(n: number): void;
-  /** Quick bidirectional roll to `n` over ~1s (tab switch — seamless hand-off). */
+  /** Fixed-duration bidirectional roll to `n` (tab switch hand-off). */
   transitionTo(n: number): void;
   /** The latest value passed to setTarget / snapTo / transitionTo. */
   value(): number;
@@ -75,6 +73,7 @@ function digitCount(n: number): number {
 }
 
 type Cell = { kind: "digit"; place: number } | { kind: "sep" };
+type DriverMode = "live" | "transition";
 
 /** Cell layout for `count` digits, MSB-first, with optional comma separators. */
 function layoutFor(count: number, groupSeparator: boolean): Cell[] {
@@ -85,6 +84,14 @@ function layoutFor(count: number, groupSeparator: boolean): Cell[] {
     cells.push({ kind: "digit", place });
   }
   return cells;
+}
+
+/** Cubic ease-in-out with a calm start and settled finish. */
+function easeInOutCubic(t: number): number {
+  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+  return clamped < 0.5
+    ? 4 * clamped * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
 }
 
 export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
@@ -99,18 +106,10 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   let latest = 0; // most recent target (returned by value())
   let frame = 0; // active rAF handle (0 == not scheduled)
   let lastTime: number | null = null; // previous frame timestamp for dt
-  // While `now < fastUntil` the ease uses TAU_FAST (a tab-switch transition);
-  // otherwise the slow live-roll TAU. Computed per-frame so a heartbeat update
-  // mid-transition never downgrades the speed.
-  let fastUntil = 0;
+  let driverMode: DriverMode = "live";
+  let transitionFrom = 0;
+  let transitionStartTime: number | null = null;
   let strips: HTMLElement[] = []; // reel strips, units-first (reels mode only)
-
-  /** Monotonic clock shared with the rAF timestamp (performance.now based). */
-  function clock(): number {
-    return typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-  }
 
   // --- reel rendering -----------------------------------------------------
   function revealEnteringCell(cell: HTMLElement): void {
@@ -212,9 +211,39 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
     if (frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
     frame = 0;
     lastTime = null;
+    driverMode = "live";
+    transitionStartTime = null;
   }
 
-  function step(now: number): void {
+  function scheduleNext(): void {
+    if (typeof requestAnimationFrame === "function") {
+      frame = requestAnimationFrame(step);
+    } else {
+      displayed = latest; // no rAF (tests): settle immediately
+      render();
+      frame = 0;
+    }
+  }
+
+  function stepTransition(now: number): void {
+    if (transitionStartTime === null) transitionStartTime = now;
+    const elapsed = Math.max(0, now - transitionStartTime);
+    const progress = TRANSITION_MS > 0 ? elapsed / TRANSITION_MS : 1;
+
+    if (progress >= 1) {
+      displayed = latest;
+      render();
+      stop();
+      return;
+    }
+
+    const eased = easeInOutCubic(progress);
+    displayed = transitionFrom + (latest - transitionFrom) * eased;
+    render();
+    scheduleNext();
+  }
+
+  function stepLive(now: number): void {
     const dt = lastTime === null ? NOMINAL_FRAME_MS : Math.max(0, now - lastTime);
     lastTime = now;
 
@@ -226,10 +255,9 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
       return;
     }
 
-    // Fast during a tab-switch transition window, slow for live rolls.
-    const tau = now < fastUntil ? TAU_FAST_MS : TAU_MS;
-    // Exponential approach (works both directions for tab-switch transitions),
-    // with a velocity floor so the tail still visibly rolls.
+    // Slow live-roll exponential approach with a velocity floor so the tail
+    // still visibly rolls.
+    const tau = TAU_MS;
     let move = gap * (1 - Math.exp(-dt / tau));
     const minMove = Math.sign(gap) * MIN_UNITS_PER_SEC * (dt / 1000);
     if (Math.abs(move) < Math.abs(minMove)) move = minMove;
@@ -237,14 +265,12 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
 
     displayed += move;
     render();
+    scheduleNext();
+  }
 
-    if (typeof requestAnimationFrame === "function") {
-      frame = requestAnimationFrame(step);
-    } else {
-      displayed = latest; // no rAF (tests): settle immediately
-      render();
-      frame = 0;
-    }
+  function step(now: number): void {
+    if (driverMode === "transition") stepTransition(now);
+    else stepLive(now);
   }
 
   function start(): void {
@@ -269,30 +295,33 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   function setTarget(n: number): void {
     const v = sanitize(n);
     // Raise-only: live/creep totals only grow. A target at or below the current
-    // value is ignored (keeps any in-flight roll going) rather than snapping
+    // value or already-higher target is ignored rather than snapping
     // backward — so the perpetual creep that drives the always-on roll is never
     // yanked back when a slightly-lower real total arrives, and a live update
     // never disturbs a downward tab-switch transition. (Range switches go
     // through transitionTo, which handles downward moves.)
-    if (v <= displayed) return;
+    if (v <= displayed || v <= latest) return;
     latest = v;
     start();
   }
 
   /**
-   * Roll quickly (and bidirectionally) toward `n` over ~1s — used on a tab
+   * Roll bidirectionally toward `n` over a fixed duration; used on a tab
    * switch so the number smoothly hands off to the new range's total instead of
-   * freezing/snapping. Opens a fast window so the ease is quick even if the live
-   * heartbeat also updates the target mid-spin. Rolls UP or DOWN as needed.
+   * freezing/snapping. The fixed duration keeps large deltas readable, while
+   * heartbeat updates can only raise the landing target mid-spin.
    */
   function transitionTo(n: number): void {
     const v = sanitize(n);
-    fastUntil = clock() + FAST_WINDOW_MS;
+    latest = v;
     if (v === displayed) {
+      stop();
       render();
       return;
     }
-    latest = v;
+    stop();
+    driverMode = "transition";
+    transitionFrom = displayed;
     start();
   }
 

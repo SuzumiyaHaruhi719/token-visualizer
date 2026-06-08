@@ -19,7 +19,7 @@ import { revealOnNextFrame } from "../lib/motion";
 export type TickerUpdateMode = "roll" | "snap" | "transition";
 
 /** Must match the CSS .ticker-row leave transition so we remove after it ends. */
-const ROW_LEAVE_MS = 340;
+const ROW_LEAVE_MS = 400;
 
 /** Apply a value to an odometer with the requested mode. */
 function applyValue(odo: OdometerHandle, n: number, mode: TickerUpdateMode): void {
