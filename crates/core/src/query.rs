@@ -159,10 +159,14 @@ fn query_by_model(
     start: Option<i64>,
     prices: &PriceTable,
 ) -> Result<Vec<ModelBreakdown>> {
+    // Exclude events with no model id from the per-model breakdown: some Claude
+    // records carry usage but no `message.model`, which would otherwise show as
+    // an empty, nameless row. Their tokens still count in the totals (computed
+    // separately) — they're just not attributable to a named model here.
     let where_clause = if start.is_some() {
-        "WHERE ts >= ?1"
+        "WHERE ts >= ?1 AND model <> ''"
     } else {
-        ""
+        "WHERE model <> ''"
     };
     let sql = format!(
         "SELECT model, \

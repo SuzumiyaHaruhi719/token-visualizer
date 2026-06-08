@@ -192,6 +192,35 @@ fn by_model_breakdown() {
 }
 
 #[test]
+fn empty_model_excluded_from_breakdown_but_counted_in_totals() {
+    let s = Store::open_in_memory().unwrap();
+    s.insert_event(&mk(
+        "named",
+        DAY1,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 100, ..Default::default() },
+    ))
+    .unwrap();
+    // An event with no model id (some Claude records carry usage but no model).
+    s.insert_event(&mk(
+        "blank",
+        DAY1 + 1000,
+        "",
+        "ProjA",
+        Usage { input: 50, ..Default::default() },
+    ))
+    .unwrap();
+
+    let sum = summary(&s, "all").unwrap();
+    // The blank-model row is NOT shown in the per-model breakdown...
+    assert_eq!(sum.by_model.len(), 1);
+    assert_eq!(sum.by_model[0].model, "claude-opus-4-8");
+    // ...but its tokens still count toward the totals.
+    assert_eq!(sum.totals.tokens, 150);
+}
+
+#[test]
 fn by_project_breakdown() {
     let s = seeded_store();
     let sum = summary(&s, "all").unwrap();
