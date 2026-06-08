@@ -192,7 +192,7 @@ fn by_model_breakdown() {
 }
 
 #[test]
-fn empty_model_excluded_from_breakdown_but_counted_in_totals() {
+fn empty_model_relabeled_other_and_rows_sum_to_total() {
     let s = Store::open_in_memory().unwrap();
     s.insert_event(&mk(
         "named",
@@ -213,10 +213,13 @@ fn empty_model_excluded_from_breakdown_but_counted_in_totals() {
     .unwrap();
 
     let sum = summary(&s, "all").unwrap();
-    // The blank-model row is NOT shown in the per-model breakdown...
-    assert_eq!(sum.by_model.len(), 1);
-    assert_eq!(sum.by_model[0].model, "claude-opus-4-8");
-    // ...but its tokens still count toward the totals.
+    // The blank-model bucket is shown as "other" (not dropped, not blank)...
+    assert_eq!(sum.by_model.len(), 2);
+    let other = sum.by_model.iter().find(|m| m.model == "other").expect("an 'other' row");
+    assert_eq!(other.tokens, 50);
+    // ...and the per-model rows now SUM to the grand total.
+    let row_sum: i64 = sum.by_model.iter().map(|m| m.tokens).sum();
+    assert_eq!(row_sum, sum.totals.tokens);
     assert_eq!(sum.totals.tokens, 150);
 }
 

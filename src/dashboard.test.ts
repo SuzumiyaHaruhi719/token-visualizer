@@ -52,6 +52,9 @@ describe("dashboard integration (mock data)", () => {
     await bootstrap();
     setOption.mockClear();
     await loadRange("7d");
+    // The chart redraw is deferred/debounced (so it doesn't hitch the number
+    // roll), so wait for that timer before asserting.
+    await new Promise((r) => setTimeout(r, 220));
     // timeseries + donut + projects each call setOption at least once
     expect(setOption.mock.calls.length).toBeGreaterThanOrEqual(3);
   });

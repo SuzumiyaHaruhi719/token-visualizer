@@ -402,6 +402,24 @@ body {
     #0e1118;
 }
 .ticker-total-wrap {
+  position: relative;
+}
+/* Static coral glow behind the number. A pre-blurred pseudo-element (computed
+   ONCE) instead of `filter: drop-shadow` on the number itself — drop-shadow
+   re-rasterizes its blur every frame the digits roll, which pegged WebView2
+   and froze the dashboard during a continuous roll. This glow never repaints. */
+.ticker-total-wrap::before {
+  content: "";
+  position: absolute;
+  left: -2%;
+  top: 28%;
+  width: 70%;
+  height: 70%;
+  background: radial-gradient(60% 100% at 30% 50%, rgba(255, 138, 92, 0.4), transparent 70%);
+  filter: blur(22px);
+  pointer-events: none;
+  z-index: 0;
+}
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -413,16 +431,14 @@ body {
   color: var(--text-faint);
 }
 .ticker-total {
+  position: relative;
+  z-index: 1; /* above the static ::before glow */
   font-size: clamp(2.4rem, 6vw, 4.2rem);
   font-weight: 800;
   line-height: 1;
   letter-spacing: -2px;
   font-variant-numeric: tabular-nums;
-  color: #ff8e63; /* solid coral */
-  /* Glow via a CONTAINER filter (not per-glyph text-shadow): the reel cells clip
-     overflow, which would box-in a text-shadow. drop-shadow halos the whole
-     composited number cleanly. */
-  filter: drop-shadow(0 0 18px rgba(255, 138, 92, 0.45));
+  color: #ff8e63; /* solid coral; glow comes from the static .ticker-total-wrap::before */
 }
 .ticker-models {
   display: flex;

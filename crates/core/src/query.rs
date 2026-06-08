@@ -159,14 +159,14 @@ fn query_by_model(
     start: Option<i64>,
     prices: &PriceTable,
 ) -> Result<Vec<ModelBreakdown>> {
-    // Exclude events with no model id from the per-model breakdown: some Claude
-    // records carry usage but no `message.model`, which would otherwise show as
-    // an empty, nameless row. Their tokens still count in the totals (computed
-    // separately) — they're just not attributable to a named model here.
+    // Include ALL events (no model filter) so the per-model rows sum to the
+    // grand total. Events with no `message.model` (some Claude records carry
+    // usage but no model id) are relabeled "other" below rather than dropped —
+    // dropping them made the rows add up to LESS than the total.
     let where_clause = if start.is_some() {
-        "WHERE ts >= ?1 AND model <> ''"
+        "WHERE ts >= ?1"
     } else {
-        "WHERE model <> ''"
+        ""
     };
     let sql = format!(
         "SELECT model, \
@@ -199,8 +199,11 @@ fn query_by_model(
                 ..Default::default()
             };
             let cost_usd = prices.cost_usd(&usage, &model);
+            // Unattributed (no model id) events show as "other" so the row is
+            // labeled and the breakdown still sums to the grand total.
+            let label = if model.is_empty() { "other".to_string() } else { model };
             ModelBreakdown {
-                model,
+                model: label,
                 tokens: input + output + cc + cr,
                 cost_usd,
             }
