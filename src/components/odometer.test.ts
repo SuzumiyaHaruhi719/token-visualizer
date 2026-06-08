@@ -87,15 +87,44 @@ describe("createOdometer — continuous driver", () => {
     expect(odo.value()).toBe(54321);
   });
 
+  it("transitionTo rolls to the new value in BOTH directions (tab switch)", () => {
+    const odo = createOdometer();
+    odo.snapTo(1000);
+    odo.transitionTo(5_000_000); // up
+    expect(odo.el.dataset.value).toBe("5,000,000");
+    odo.transitionTo(200); // down — transitions, does not stay stuck
+    expect(odo.el.dataset.value).toBe("200");
+    expect(odo.value()).toBe(200);
+  });
+});
+
+describe("createOdometer — reels (slot-machine) mode", () => {
+  it("renders per-digit reel cells + comma separators with the value exposed", () => {
+    const odo = createOdometer({ reels: true });
+    odo.snapTo(1234567);
+    expect(odo.el.classList.contains("odometer-reels")).toBe(true);
+    expect(odo.el.querySelectorAll(".odo-digit").length).toBe(7);
+    expect(odo.el.querySelectorAll(".odo-sep").length).toBe(2);
+    expect(odo.el.dataset.value).toBe("1,234,567");
+  });
+
+  it("rolls to an upward target and settles exactly (reels)", () => {
+    const odo = createOdometer({ reels: true });
+    odo.snapTo(100);
+    odo.setTarget(987654);
+    expect(odo.el.dataset.value).toBe("987,654");
+    expect(odo.value()).toBe(987654);
+  });
+
   it("rolls through many smooth, gradually-increasing frames (not a snap)", () => {
     // Drive real ~16ms frames (instead of the global huge-step stub) to observe
     // the in-flight motion: a single update must roll gradually over many frames,
     // strictly increasing, without jumping straight to the target.
     const real = globalThis.requestAnimationFrame;
-    let pending: FrameRequestCallback | null = null;
+    const queue: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = ((fn: FrameRequestCallback) => {
-      pending = fn;
-      return 1;
+      queue.push(fn);
+      return queue.length;
     }) as typeof globalThis.requestAnimationFrame;
     try {
       const odo = createOdometer();
@@ -104,9 +133,9 @@ describe("createOdometer — continuous driver", () => {
 
       const frames: number[] = [];
       let t = 0;
-      for (let i = 0; i < 120 && pending; i++) {
-        const cb = pending;
-        pending = null;
+      for (let i = 0; i < 120; i++) {
+        const cb = queue.shift();
+        if (!cb) break;
         t += 16.7;
         cb(t);
         frames.push(Number((odo.el.dataset.value ?? "0").replace(/,/g, "")));

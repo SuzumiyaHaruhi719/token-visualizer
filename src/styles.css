@@ -103,12 +103,35 @@ body {
   filter: drop-shadow(0 0 10px rgba(255, 138, 92, 0.65));
 }
 .range-tabs {
+  position: relative; /* anchors the sliding .range-indicator pill */
   display: flex;
   gap: 3px;
   padding: 5px;
   border-radius: 13px;
 }
+/* The sliding active-tab pill. JS sets its width/height/transform to the active
+   tab's box; the spring-eased transition glides it between tabs (premium,
+   seamless) instead of the highlight hard-cutting from one tab to the next. */
+.range-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 0;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #ffa074, var(--accent-deep));
+  box-shadow:
+    0 0 0 1px rgba(255, 138, 92, 0.5),
+    0 6px 18px rgba(255, 138, 92, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+  transition:
+    transform 0.42s cubic-bezier(0.34, 1.25, 0.4, 1),
+    width 0.42s cubic-bezier(0.34, 1.25, 0.4, 1),
+    height 0.42s ease;
+}
 .range-tab {
+  position: relative; /* sit above the indicator */
+  z-index: 1;
   border: none;
   background: transparent;
   color: var(--text-dim);
@@ -118,18 +141,13 @@ body {
   padding: 7px 16px;
   border-radius: 9px;
   cursor: pointer;
-  transition: background 0.18s, color 0.18s, box-shadow 0.18s, transform 0.1s;
+  transition: color 0.25s ease, transform 0.1s;
 }
-.range-tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.range-tab:hover { color: var(--text); }
 .range-tab:active { transform: translateY(1px); }
 .range-tab.active {
-  color: #1c1208;
+  color: #1c1208; /* pill background is the moving .range-indicator */
   font-weight: 650;
-  background: linear-gradient(180deg, #ffa074, var(--accent-deep));
-  box-shadow:
-    0 0 0 1px rgba(255, 138, 92, 0.5),
-    0 6px 18px rgba(255, 138, 92, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 .live {
   display: flex;
@@ -347,6 +365,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  /* The big total is a slot-machine reel (overflow-clipped digit cells). Over a
+     backdrop-filter ancestor those clipped cells punch through to the dark page
+     background (ugly boxes), so give the ticker panel a SOLID layered surface
+     (no backdrop blur) and the digits blend in cleanly. */
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.022)),
+    #0e1118;
 }
 .ticker-total-wrap {
   display: flex;
@@ -366,7 +393,10 @@ body {
   letter-spacing: -2px;
   font-variant-numeric: tabular-nums;
   color: #ff8e63; /* solid coral */
-  text-shadow: 0 0 26px rgba(255, 138, 92, 0.45); /* glow — safe now (no clipped cells) */
+  /* Glow via a CONTAINER filter (not per-glyph text-shadow): the reel cells clip
+     overflow, which would box-in a text-shadow. drop-shadow halos the whole
+     composited number cleanly. */
+  filter: drop-shadow(0 0 18px rgba(255, 138, 92, 0.45));
 }
 .ticker-models {
   display: flex;
@@ -398,11 +428,40 @@ body {
 }
 
 /* Rolling number ---------------------------------------------------------- */
-/* One cohesive counting number. tabular-nums keeps the width steady so it does
-   not jitter horizontally as the digits roll. */
+/* Plain mode (per-model rows): one cohesive counting number. tabular-nums keeps
+   the width steady so it does not jitter horizontally as the digits roll. */
 .odometer {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* Reels mode (the big total): a slot-machine vertical digit roll. Each digit is
+   a 1-glyph window onto a vertical 0-9 strip that rolls; commas are static. */
+.odometer-reels {
+  display: inline-flex;
+  align-items: stretch;
+  line-height: 1;
+}
+.odometer-reels .odo-digit {
+  display: inline-block;
+  overflow: hidden; /* clip the strip to a single glyph */
+  height: 1em;
+  width: 1ch; /* one full tabular digit advance — no horizontal squish */
+  vertical-align: top;
+}
+.odometer-reels .odo-strip {
+  display: flex;
+  flex-direction: column;
+}
+.odometer-reels .odo-glyph {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
+}
+.odometer-reels .odo-sep {
+  display: inline-block;
+  vertical-align: top;
 }
 
 /* Session limits panel -------------------------------------------------- */

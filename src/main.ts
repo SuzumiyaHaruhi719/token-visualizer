@@ -63,6 +63,7 @@ function renderShell(root: HTMLElement): void {
     <header class="topbar">
       <div class="brand"><span class="hex">⬡</span> Claude Monitor</div>
       <nav class="range-tabs" id="range-tabs">
+        <span class="range-indicator" id="range-indicator"></span>
         ${RANGES.map(
           (r, i) =>
             `<button class="range-tab${i === 0 ? " active" : ""}" data-range="${r.key}">${r.label}</button>`,
@@ -235,50 +236,78 @@ function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** Read the legend's current on/off selection so it survives a re-render. */
+function legendSelection(chart: echarts.ECharts): Record<string, boolean> | undefined {
+  if (typeof chart.getOption !== "function") return undefined; // e.g. test mock
+  const opt = chart.getOption() as { legend?: Array<{ selected?: Record<string, boolean> }> };
+  return opt?.legend?.[0]?.selected;
+}
+
 function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
+  // "today" uses an hourly intraday curve drawn as a smooth gradient AREA chart;
+  // every other range uses daily buckets drawn as stacked BARS.
+  const isDay = (s.range as RangeKey) === "today";
   const x = s.timeseries.map((b) => bucketLabel(b.bucket, s.range as RangeKey));
-  // Single-bucket case: a smooth area with one point renders nothing. Keep
-  // boundaryGap false so the area spans the plot edge-to-edge and a lone point
-  // still anchors a visible filled column.
   const singlePoint = x.length <= 1;
-  const series = (
-    [
-      ["Fresh input", "input", COLORS.input],
-      ["Output", "output", COLORS.output],
-      ["Cache write", "cacheCreate", COLORS.cacheCreate],
-      ["Cache read", "cacheRead", COLORS.cacheRead],
-    ] as const
-  ).map(([name, key, color]) => ({
-    name,
-    type: "line" as const,
-    stack: "tok",
-    smooth: true,
-    showSymbol: singlePoint, // show the marker when there's only one bucket
-    symbolSize: 6,
-    lineStyle: { width: 1.5, color },
-    itemStyle: { color },
-    areaStyle: { color: areaGradient(color), opacity: 1 },
-    emphasis: { focus: "series" as const },
-    data: s.timeseries.map((b) => b[key]),
-  }));
+  const defs = [
+    ["Fresh input", "input", COLORS.input],
+    ["Output", "output", COLORS.output],
+    ["Cache write", "cacheCreate", COLORS.cacheCreate],
+    ["Cache read", "cacheRead", COLORS.cacheRead],
+  ] as const;
+
+  const series = defs.map(([name, key, color]) =>
+    isDay
+      ? {
+          name,
+          type: "line" as const,
+          stack: "tok",
+          smooth: true,
+          showSymbol: singlePoint, // show the marker when there's only one bucket
+          symbolSize: 6,
+          lineStyle: { width: 1.5, color },
+          itemStyle: { color },
+          areaStyle: { color: areaGradient(color), opacity: 1 },
+          emphasis: { focus: "series" as const },
+          data: s.timeseries.map((b) => b[key]),
+        }
+      : {
+          name,
+          type: "bar" as const,
+          stack: "tok",
+          itemStyle: { color },
+          barMaxWidth: 36,
+          emphasis: { focus: "series" as const },
+          data: s.timeseries.map((b) => b[key]),
+        },
+  );
+
+  // Preserve the user's legend toggles across re-renders. Without this, every
+  // live refresh (which uses notMerge to swap chart type cleanly) would reset
+  // the selection — so clicking "Cache read" appeared to bounce right back.
+  const selected = legendSelection(chart);
 
   chart.setOption(
     {
       backgroundColor: "transparent",
       tooltip: {
         trigger: "axis",
-        axisPointer: { type: "line", lineStyle: { color: COLORS.axis } },
+        axisPointer: {
+          type: isDay ? "line" : "shadow",
+          lineStyle: { color: COLORS.axis },
+        },
         valueFormatter: (v: number) => formatTokens(v),
       },
       legend: {
-        data: series.map((x) => x.name),
+        data: defs.map((d) => d[0]),
         textStyle: { color: COLORS.label },
         top: 0,
+        ...(selected ? { selected } : {}),
       },
       grid: { left: 56, right: 16, top: 36, bottom: 28 },
       xAxis: {
         type: "category",
-        boundaryGap: false,
+        boundaryGap: !isDay, // bars sit inside categories; the area spans edge-to-edge
         data: x,
         axisLine: { lineStyle: { color: COLORS.axis } },
         axisLabel: { color: COLORS.label },
@@ -496,6 +525,23 @@ function setActiveTab(range: RangeKey): void {
   tabs.forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.range === range);
   });
+  positionRangeIndicator(range);
+}
+
+/**
+ * Slide the active-tab pill under the selected range tab. The indicator is one
+ * absolutely-positioned element that transitions its transform + size (CSS), so
+ * switching tabs glides the pill instead of hard-cutting the highlight.
+ */
+function positionRangeIndicator(range: RangeKey): void {
+  const indicator = document.getElementById("range-indicator");
+  const btn = el("range-tabs").querySelector<HTMLElement>(
+    `.range-tab[data-range="${range}"]`,
+  );
+  if (!indicator || !btn) return;
+  indicator.style.width = `${btn.offsetWidth}px`;
+  indicator.style.height = `${btn.offsetHeight}px`;
+  indicator.style.transform = `translate(${btn.offsetLeft}px, ${btn.offsetTop}px)`;
 }
 
 /**
@@ -503,7 +549,9 @@ function setActiveTab(range: RangeKey): void {
  * token-ticker odometers). Cheap enough to run on the 2Hz heartbeat — does NOT
  * touch the ECharts charts.
  */
-function updateNumbers(summary: Summary, tickerMode: "roll" | "snap" = "roll"): void {
+type TickerMode = "roll" | "snap" | "transition";
+
+function updateNumbers(summary: Summary, tickerMode: TickerMode = "roll"): void {
   renderKpis(summary);
   renderCachePanel(summary);
   renderBySource(el("bysource"), summary.bySource as BySource[]);
@@ -518,7 +566,7 @@ function updateCharts(summary: Summary): void {
   renderProjects(charts.projects, summary);
 }
 
-function renderSummary(summary: Summary, tickerMode: "roll" | "snap" = "roll"): void {
+function renderSummary(summary: Summary, tickerMode: TickerMode = "roll"): void {
   updateNumbers(summary, tickerMode);
   updateCharts(summary);
 }
@@ -527,9 +575,13 @@ async function loadRange(range: RangeKey): Promise<void> {
   currentRange = range;
   setActiveTab(range);
   const summary = normalizeSummary(await getSummary(range), range);
-  // Range switch: SNAP the odometers so we don't roll for seconds across
-  // wildly different totals (e.g. today -> all).
-  renderSummary(summary, "snap");
+  // Seamless tab switch: the odometers TRANSITION (a quick ~1s bidirectional
+  // roll) to the new range's total instead of snapping/freezing — the slot
+  // machine spins to the new value with no stop.
+  renderSummary(summary, "transition");
+  // Let that transition play out uninterrupted: the 2Hz heartbeat would
+  // otherwise re-target the odometers (slow roll / downward snap) mid-spin.
+  tabTransitionUntil = Date.now() + 1100;
 }
 
 /** Re-fetch the current range's summary and re-render KPIs + charts in place. */
@@ -552,6 +604,9 @@ async function refreshSummary(): Promise<void> {
 const HEARTBEAT_MS = 500;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatInFlight = false;
+// While a tab-switch transition is playing, the heartbeat holds off so it does
+// not re-target the odometers mid-spin (which would slow or snap the roll).
+let tabTransitionUntil = 0;
 
 /** One heartbeat tick: refresh numeric readouts only. Skipped while hidden. */
 async function heartbeatTick(): Promise<void> {
@@ -559,6 +614,7 @@ async function heartbeatTick(): Promise<void> {
   if (typeof document !== "undefined" && document.visibilityState !== "visible") {
     return;
   }
+  if (Date.now() < tabTransitionUntil) return; // let a tab transition finish
   if (heartbeatInFlight) return; // never let ticks overlap on a slow fetch
   heartbeatInFlight = true;
   try {

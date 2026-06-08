@@ -15,14 +15,17 @@ import { createOdometer, type OdometerHandle } from "./odometer";
 
 // How a number update is applied to its odometer:
 //  - "roll": slowly ease UP toward the value (live increments within a range).
-//  - "snap": jump immediately (first paint / range switch — never roll for
-//    seconds across billions when switching today/7d/30d/all).
-export type TickerUpdateMode = "roll" | "snap";
+//  - "snap": jump immediately, no animation (first paint / structural rebuild).
+//  - "transition": quick bidirectional ~1s roll (tab switch — seamless hand-off
+//    to the new range's total, no freeze).
+export type TickerUpdateMode = "roll" | "snap" | "transition";
 
 /** Apply a value to an odometer with the requested mode. */
 function applyValue(odo: OdometerHandle, n: number, mode: TickerUpdateMode): void {
   if (mode === "roll") {
     odo.setTarget(n);
+  } else if (mode === "transition") {
+    odo.transitionTo(n);
   } else {
     odo.snapTo(n);
   }
@@ -92,8 +95,9 @@ export function renderTokenTicker(container: HTMLElement, summary: Summary | nul
     </div>
     <div class="ticker-models">${rows}</div>`;
 
-  // Mount a fresh odometer for the total and one per model row.
-  const total = createOdometer();
+  // Mount a fresh odometer for the total (slot-machine reels) and one plain
+  // odometer per model row.
+  const total = createOdometer({ reels: true });
   container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
 
   const byModel = new Map<string, OdometerHandle>();
@@ -181,8 +185,8 @@ function rebuildPreserving(
     </div>
     <div class="ticker-models">${rows}</div>`;
 
-  // Re-use the total odometer if we had one; otherwise create it.
-  const total = prev?.total ?? createOdometer();
+  // Re-use the total odometer if we had one; otherwise create it (reels).
+  const total = prev?.total ?? createOdometer({ reels: true });
   container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
 
   const byModel = new Map<string, OdometerHandle>();
