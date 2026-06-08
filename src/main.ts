@@ -65,6 +65,9 @@ type Charts = {
 
 let currentRange: RangeKey = "today";
 let charts: Charts | null = null;
+// Monotonic token for tab-switch fetches; only the latest one applies its
+// result (guards against out-of-order getSummary resolution on fast clicks).
+let loadSeq = 0;
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -610,16 +613,24 @@ function renderSummary(
 }
 
 async function loadRange(range: RangeKey): Promise<void> {
+  // Sequence guard: fast tab clicks fire overlapping loadRange calls whose
+  // getSummary fetches can resolve OUT OF ORDER. Without this, a stale (earlier)
+  // range's result could land last and win — and worse, set `rollFloor` to that
+  // range's total, which the raise-only heartbeat then locks in (the tab says
+  // "today" but the number stays stuck on 30d). Only the most-recent click
+  // applies its result.
+  const seq = ++loadSeq;
   currentRange = range;
   setActiveTab(range);
   const summary = normalizeSummary(await getSummary(range), range);
+  if (seq !== loadSeq) return; // superseded by a newer tab switch — drop this stale result
   // Restart the perpetual creep from the new range's total so the heartbeat
   // doesn't keep an old (much larger) range's floor.
   rollFloor = summary.totals.tokens;
-  // Seamless tab switch: the total TRANSITIONS (a quick ~1s bidirectional roll,
-  // opening the odometer's fast window) to the new range's total. The heartbeat
-  // keeps running — its raise-only creep can't disturb a downward spin and just
-  // resumes the upward roll once the transition lands, so there is no pause.
+  // Seamless tab switch: the total TRANSITIONS (a quick fixed-duration roll) to
+  // the new range's total. The heartbeat keeps running — its raise-only creep
+  // can't disturb a downward spin and just resumes the roll once the transition
+  // lands, so there is no pause.
   renderSummary(summary, "transition");
 }
 
