@@ -16,9 +16,19 @@
 
 import { formatInt } from "../lib/format";
 
-// Playback lag: a bit above the dashboard's ~500ms sample cadence so a "next"
-// sample is always buffered to interpolate toward (=> continuous motion).
-const RENDER_DELAY_MS = 750;
+// Roll speed. The displayed value eases toward the latest target on an
+// exponential approach with time-constant TAU_MS, so a single update keeps
+// visibly rolling for several seconds (~95% closed in ~3*TAU). Token totals only
+// change when a message completes (every few seconds), so a SLOW roll means each
+// change is still rolling when the next arrives — the number rolls continuously
+// during active use instead of snapping and freezing. Latency does not matter
+// here (the user wants the motion); the displayed value simply lags the latest.
+// MIN_UNITS_PER_SEC keeps it visibly creeping near the end; once within
+// CONVERGE_EPSILON it snaps and stops scheduling (so the rAF test stub ends).
+const TAU_MS = 2000;
+const MIN_UNITS_PER_SEC = 8;
+const CONVERGE_EPSILON = 1;
+const NOMINAL_FRAME_MS = 16.6667;
 
 export interface OdometerOptions {
   /** Accepted for API compatibility; thousands separators are always on. */
@@ -55,18 +65,9 @@ export function createOdometer(_opts: OdometerOptions = {}): OdometerHandle {
   root.setAttribute("role", "text");
 
   let displayed = 0; // the value currently painted (a float, eased)
-  let latest = 0; // most recent value pushed (returned by value())
-  // Recent samples in ASCENDING time order; the driver plays back through them
-  // RENDER_DELAY_MS behind real time. Timestamps share `clock()` with rAF.
-  let samples: { v: number; t: number }[] = [];
+  let latest = 0; // most recent target value (returned by value())
   let frame = 0; // active rAF handle (0 == not scheduled)
-
-  /** Monotonic clock shared by sample timestamps and the rAF callback. */
-  function clock(): number {
-    return typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-  }
+  let lastTime: number | null = null; // previous frame timestamp for dt
 
   /** Paint the current `displayed` value as one cohesive formatted number. */
   function render(): void {
@@ -81,53 +82,42 @@ export function createOdometer(_opts: OdometerOptions = {}): OdometerHandle {
       cancelAnimationFrame(frame);
     }
     frame = 0;
-  }
-
-  /** Drop samples older than the one bracketing the current render time. */
-  function trimSamples(renderTime: number): void {
-    let keepFrom = 0;
-    for (let i = 0; i < samples.length - 1; i++) {
-      if (samples[i + 1].t <= renderTime) keepFrom = i + 1;
-    }
-    if (keepFrom > 0) samples = samples.slice(keepFrom);
+    lastTime = null;
   }
 
   /**
-   * One playback frame: interpolate `displayed` between the two buffered samples
-   * bracketing `now - RENDER_DELAY_MS`, render, and reschedule until playback has
-   * drained to the latest sample (then stop so the rAF test stub terminates).
+   * One frame: ease `displayed` toward `latest` on a slow exponential approach,
+   * render, and reschedule until it converges (then stop so the rAF test stub
+   * terminates). The slow time-constant keeps a single change rolling for
+   * several seconds, so during active use the number rolls continuously.
    */
   function step(now: number): void {
-    const renderTime = now - RENDER_DELAY_MS;
+    const dt = lastTime === null ? NOMINAL_FRAME_MS : Math.max(0, now - lastTime);
+    lastTime = now;
 
-    let a = samples[0];
-    let b: { v: number; t: number } | null = null;
-    for (const s of samples) {
-      if (s.t <= renderTime) a = s;
-      else {
-        b = s;
-        break;
-      }
+    const gap = latest - displayed;
+    if (gap < CONVERGE_EPSILON) {
+      displayed = latest;
+      render();
+      stop();
+      return;
     }
 
-    if (b) {
-      const span = Math.max(1, b.t - a.t);
-      const p = Math.min(1, Math.max(0, (renderTime - a.t) / span));
-      displayed = a.v + (b.v - a.v) * p;
-    } else {
-      displayed = a.v;
-    }
+    // Exponential approach: close a TAU-scaled fraction of the gap each frame,
+    // but never slower than MIN_UNITS_PER_SEC so the tail still visibly rolls.
+    let move = gap * (1 - Math.exp(-dt / TAU_MS));
+    const minMove = MIN_UNITS_PER_SEC * (dt / 1000);
+    if (move < minMove) move = minMove;
+    if (move > gap) move = gap;
+
+    displayed += move;
     render();
-    trimSamples(renderTime);
 
-    const last = samples[samples.length - 1];
-    if (b !== null && renderTime < last.t && typeof requestAnimationFrame === "function") {
+    if (typeof requestAnimationFrame === "function") {
       frame = requestAnimationFrame(step);
     } else {
-      // Drained: settle exactly on the latest value and stop scheduling.
-      displayed = last.v;
+      displayed = latest; // no rAF (tests): jump to the target
       render();
-      samples = [last];
       frame = 0;
     }
   }
@@ -139,6 +129,7 @@ export function createOdometer(_opts: OdometerOptions = {}): OdometerHandle {
       render();
       return;
     }
+    lastTime = null;
     frame = requestAnimationFrame(step);
   }
 
@@ -146,28 +137,18 @@ export function createOdometer(_opts: OdometerOptions = {}): OdometerHandle {
     const v = sanitize(n);
     latest = v;
     displayed = v;
-    samples = [];
     stop();
     render();
   }
 
   function setTarget(n: number): void {
     const v = sanitize(n);
+    // Downward target (range switch to a smaller total) snaps; don't roll down.
     if (v < displayed) {
       snapTo(v);
       return;
     }
     latest = v;
-    if (v === displayed && samples.length === 0) {
-      render();
-      return;
-    }
-    const t = clock();
-    if (samples.length === 0) {
-      // Seed a starting point one delay back so we roll from where we are now.
-      samples.push({ v: displayed, t: t - RENDER_DELAY_MS });
-    }
-    samples.push({ v, t });
     start();
   }
 
