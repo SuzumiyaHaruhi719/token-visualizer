@@ -39,6 +39,10 @@ const EASE_FRACTION = 0.06; // fraction of remaining gap closed per ~16ms frame
 const MIN_VELOCITY = 1.2; // minimum units per second so motion stays visible
 const CONVERGE_EPSILON = 1; // snap + stop when within this of target
 const NOMINAL_FRAME_MS = 16.6667; // reference frame for EASE_FRACTION scaling
+// A higher wheel (tens and up) only rolls during the final (1 - CARRY_START) of
+// its approach — i.e. when the wheel below it is wrapping 9->0 — so settled
+// numbers read crisply instead of every wheel parking at a fractional offset.
+const CARRY_START = 0.9;
 
 export interface OdometerOptions {
   /** Insert static comma cells every 3 digits (default true). */
@@ -137,14 +141,25 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   }
 
   /**
-   * Continuous wheel offset for place `p` at the given (float) value: the
-   * fractional position of digit p, so higher places turn 10x slower each.
-   * Returns a value in [0, 10).
+   * Wheel offset for place `p` at the given (float) value, in [0, 10].
+   *
+   * The UNITS wheel (p=0) rolls fully continuously (`value mod 10`) so the
+   * lowest digit is always spinning. Higher wheels sit CRISPLY on their exact
+   * integer digit and only roll during the final [`CARRY_START`..1) of their
+   * approach — i.e. exactly when the wheel below wraps 9->0 — so a settled
+   * number reads cleanly (e.g. 449,297,072 shows 7 on the tens wheel, not 7.2)
+   * instead of every wheel parking mid-glyph.
    */
   function wheelOffset(value: number, p: number): number {
-    const scaled = value / Math.pow(DIGIT_BASE, p);
-    const mod = scaled % DIGIT_BASE;
-    return mod < 0 ? mod + DIGIT_BASE : mod;
+    if (p === 0) {
+      const u = value % DIGIT_BASE;
+      return u < 0 ? u + DIGIT_BASE : u;
+    }
+    const place = value / Math.pow(DIGIT_BASE, p);
+    const digit = ((Math.floor(place) % DIGIT_BASE) + DIGIT_BASE) % DIGIT_BASE;
+    const frac = place - Math.floor(place);
+    const roll = frac > CARRY_START ? (frac - CARRY_START) / (1 - CARRY_START) : 0;
+    return digit + roll;
   }
 
   /**
