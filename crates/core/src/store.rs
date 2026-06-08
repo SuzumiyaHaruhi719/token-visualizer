@@ -6,6 +6,7 @@
 //! write while the UI reads.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -14,6 +15,10 @@ use crate::model::ParsedEvent;
 
 /// Bump when the `events`/`import_state` schema changes.
 pub const SCHEMA_VERSION: i64 = 2;
+
+/// How long a connection waits for the write lock before returning SQLITE_BUSY.
+/// Sized to outlast a worst-case backfill write burst so readers never fail.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
@@ -36,7 +41,10 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_model ON events(model);
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
+-- NOTE: the index on `source` is created in `migrate()`, NOT here. On a
+-- pre-existing v1 `events` table the CREATE TABLE above is a no-op (so the
+-- `source` column is still absent), and creating the index here would fail
+-- with "no such column: source" before migrate() can add the column.
 
 CREATE TABLE IF NOT EXISTS import_state (
     file           TEXT PRIMARY KEY,
@@ -73,6 +81,11 @@ impl Store {
     }
 
     fn init(&self, wal: bool) -> Result<()> {
+        // Wait (rather than fail with SQLITE_BUSY) when another connection holds
+        // the write lock. The startup backfill can hold it for several seconds;
+        // without this, every concurrent reader/opener — including the schema
+        // DDL below — would error out instantly while the import runs.
+        self.conn.busy_timeout(BUSY_TIMEOUT)?;
         if wal {
             // WAL lets the watcher write while the UI reads concurrently.
             self.conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -92,11 +105,14 @@ impl Store {
             .prepare("SELECT source FROM events LIMIT 0")
             .is_ok();
         if !has_source {
-            self.conn.execute_batch(
-                "ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'claude';
-                 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);",
-            )?;
+            // Add the column to a pre-existing v1 table; existing rows default
+            // to 'claude'. (A fresh DB already has it from SCHEMA_SQL.)
+            self.conn
+                .execute_batch("ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'claude';")?;
         }
+        // The `source` column now exists either way, so it is safe to index it.
+        self.conn
+            .execute_batch("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);")?;
         Ok(())
     }
 
@@ -227,4 +243,104 @@ fn insert_one(
         ],
     )?;
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pre-`source` (v1) `events` schema: no `source`/`source_file`/`line_offset`
+    /// columns. Mirrors a DB created before the Codex/source migration shipped.
+    const V1_SCHEMA_SQL: &str = r#"
+        CREATE TABLE events (
+            request_id   TEXT PRIMARY KEY,
+            ts           INTEGER NOT NULL,
+            session_id   TEXT NOT NULL,
+            project      TEXT NOT NULL,
+            model        TEXT NOT NULL,
+            input        INTEGER NOT NULL,
+            output       INTEGER NOT NULL,
+            cache_create INTEGER NOT NULL,
+            cache_read   INTEGER NOT NULL,
+            web_search   INTEGER NOT NULL,
+            web_fetch    INTEGER NOT NULL
+        );
+        CREATE TABLE import_state (
+            file           TEXT PRIMARY KEY,
+            byte_offset    INTEGER NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+    "#;
+
+    fn temp_db_path() -> std::path::PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cm-store-test-{}-{now}.sqlite", std::process::id()))
+    }
+
+    /// Regression: opening a pre-existing v1 DB (events table lacking `source`)
+    /// must upgrade cleanly instead of failing with "no such column: source".
+    /// This reproduces the bug where the source index lived in SCHEMA_SQL and
+    /// ran against the old table before migrate() added the column.
+    #[test]
+    fn opens_and_upgrades_a_v1_database() {
+        let path = temp_db_path();
+
+        // Build a v1 DB with one row, then drop the connection.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(V1_SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO events
+                    (request_id, ts, session_id, project, model,
+                     input, output, cache_create, cache_read, web_search, web_fetch)
+                 VALUES ('r1', 1, 's1', 'p', 'claude-opus-4-8', 10, 20, 0, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // The previously-broken path: opening must succeed (runs SCHEMA_SQL then migrate).
+        let store = Store::open(&path).expect("v1 DB should upgrade, not error");
+
+        // `source` column now exists and the legacy row defaulted to 'claude'.
+        let src: String = store
+            .conn
+            .query_row("SELECT source FROM events WHERE request_id = 'r1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(src, "claude");
+
+        // The source index was created by migrate(), not SCHEMA_SQL.
+        let idx_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='index' AND name='idx_events_source'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
+
+        // Idempotent: opening again is a no-op, not an error.
+        let _ = Store::open(&path).expect("second open should also succeed");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A brand-new DB opens cleanly and already has the `source` column + index.
+    #[test]
+    fn opens_a_fresh_database_with_source() {
+        let path = temp_db_path();
+        let store = Store::open(&path).unwrap();
+        assert!(store
+            .conn
+            .prepare("SELECT source FROM events LIMIT 0")
+            .is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
 }

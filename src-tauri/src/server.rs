@@ -443,6 +443,9 @@ impl From<anyhow::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        // Log the full error chain server-side (cause + context); return only a
+        // short message to the client so we never leak internals over HTTP.
+        eprintln!("[api] request failed: {:#}", self.0);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("internal error: {}", self.0),
