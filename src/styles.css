@@ -406,8 +406,8 @@ body {
 .ticker-models {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  /* Grow to fit all models — no max-height/overflow so there's no scrollbar. */
+  /* Spacing is per-row margin (not flex gap) so a leaving row's margin can
+     collapse with it — the list reflows smoothly on enter/leave, no scrollbar. */
 }
 .ticker-empty { color: var(--text-faint); font-size: 0.82rem; }
 .ticker-row {
@@ -415,9 +415,31 @@ body {
   align-items: baseline;
   gap: 14px;
   padding: 9px 13px;
+  margin-bottom: 9px;
   border-radius: 11px;
   background: var(--glass-2);
   box-shadow: inset 0 0 0 1px var(--glass-border);
+  /* Enter/leave: collapse + fade. max-height drives the height collapse (the
+     row is ~40px, 60 is a safe cap), opacity/transform the fade/slide. */
+  max-height: 60px;
+  overflow: hidden;
+  transition:
+    max-height var(--dur-med) var(--ease-premium),
+    opacity var(--dur-med) var(--ease-premium),
+    margin-bottom var(--dur-med) var(--ease-premium),
+    padding-top var(--dur-med) var(--ease-premium),
+    padding-bottom var(--dur-med) var(--ease-premium),
+    transform var(--dur-med) var(--ease-premium-pop);
+}
+.ticker-row:last-child { margin-bottom: 0; }
+.ticker-row.entering,
+.ticker-row.leaving {
+  max-height: 0;
+  opacity: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  transform: translateY(-6px);
 }
 .ticker-model {
   font-size: 0.88rem;

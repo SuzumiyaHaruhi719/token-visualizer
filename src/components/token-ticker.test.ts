@@ -80,7 +80,8 @@ describe("updateTokenTicker", () => {
 
     const fewer: Summary = { ...base, byModel: base.byModel.slice(0, 1) };
     updateTokenTicker(root, fewer);
-    expect(root.querySelectorAll(".ticker-row").length).toBe(1);
+    // Departed rows animate out (`.leaving`) before removal; the visible set is 1.
+    expect(root.querySelectorAll(".ticker-row:not(.leaving)").length).toBe(1);
   });
 
   it("does not throw when updating with null data", () => {

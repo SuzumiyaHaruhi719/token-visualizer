@@ -3,37 +3,32 @@
 // number ROLLS (mechanical-odometer style) to its new value when fresh usage
 // arrives, whether from SSE or the 2Hz heartbeat in main.ts.
 //
-// Unlike the KPI strip (which uses the abbreviated formatTokens), this module
-// shows the full integer with thousands separators, exact to the ones digit.
-// The host (main.ts) owns the fetch/SSE wiring and calls renderTokenTicker once,
-// then updateTokenTicker on every range switch / live refresh. Odometer handles
-// are cached per element (total + per-model) and REUSED across updates so each
-// number rolls from its prior value instead of rebuilding/snapping.
+// Rows are reconciled BY MODEL KEY (not innerHTML-replaced), so when the model
+// set changes on a tab switch the rows ENTER (expand + fade in) and LEAVE
+// (collapse + fade out) smoothly, and the big-total reel is mounted ONCE and
+// never re-created — it keeps rolling seamlessly across range switches.
 
 import type { Summary, ByModel } from "../lib/types";
 import { createOdometer, type OdometerHandle } from "./odometer";
-import { animateHeightChange } from "../lib/motion";
+import { revealOnNextFrame } from "../lib/motion";
 
 // How a number update is applied to its odometer:
 //  - "roll": slowly ease UP toward the value (live increments within a range).
-//  - "snap": jump immediately, no animation (first paint / structural rebuild).
-//  - "transition": quick bidirectional ~1s roll (tab switch — seamless hand-off
-//    to the new range's total, no freeze).
+//  - "snap": jump immediately, no animation (first paint).
+//  - "transition": quick bidirectional roll (tab switch — seamless hand-off).
 export type TickerUpdateMode = "roll" | "snap" | "transition";
+
+/** Must match the CSS .ticker-row leave transition so we remove after it ends. */
+const ROW_LEAVE_MS = 340;
 
 /** Apply a value to an odometer with the requested mode. */
 function applyValue(odo: OdometerHandle, n: number, mode: TickerUpdateMode): void {
-  if (mode === "roll") {
-    odo.setTarget(n);
-  } else if (mode === "transition") {
-    odo.transitionTo(n);
-  } else {
-    odo.snapTo(n);
-  }
+  if (mode === "roll") odo.setTarget(n);
+  else if (mode === "transition") odo.transitionTo(n);
+  else odo.snapTo(n);
 }
 
-// Cached odometer handles for the currently mounted panel. The total uses
-// `total`; per-model handles are keyed by model name. Reset on full rebuild.
+// Cached odometer handles for the currently mounted panel.
 interface TickerState {
   total: OdometerHandle;
   byModel: Map<string, OdometerHandle>;
@@ -50,6 +45,11 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
+}
+
+/** Escape a model name for use inside a CSS attribute selector. */
+function cssEscape(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 function safeModels(summary: Summary | null | undefined): ByModel[] {
@@ -69,60 +69,48 @@ function safeTotal(summary: Summary | null | undefined): number {
   return typeof t === "number" && Number.isFinite(t) ? t : 0;
 }
 
-/**
- * Build the ticker panel markup into `container` from a (possibly null) summary.
- * Tolerates null totals (shows 0) and null/empty byModel (shows a muted note).
- * Mounts fresh odometers and rolls them up from 0 to the initial values.
- */
-export function renderTokenTicker(container: HTMLElement, summary: Summary | null): void {
-  const models = safeModels(summary);
-
-  const rows = models.length
-    ? models
-        .map(
-          (m) => `
-        <div class="ticker-row" data-model="${escapeHtml(m.model)}">
-          <span class="ticker-model">${escapeHtml(shortModel(m.model))}</span>
-          <span class="ticker-count" data-model="${escapeHtml(m.model)}"></span>
-        </div>`,
-        )
-        .join("")
-    : `<div class="ticker-empty">no model data</div>`;
-
-  container.innerHTML = `
+const SHELL_MARKUP = `
     <div class="ticker-total-wrap">
       <span class="ticker-label">Total tokens · live</span>
       <span class="ticker-total" id="ticker-total"></span>
     </div>
-    <div class="ticker-models">${rows}</div>`;
+    <div class="ticker-models"></div>`;
 
-  // Mount a fresh odometer for the total (slot-machine reels) and one plain
-  // odometer per model row.
+/** Build the panel shell + the (reels) total odometer, once. */
+function buildShell(container: HTMLElement): TickerState {
+  container.innerHTML = SHELL_MARKUP;
   const total = createOdometer({ reels: true });
   container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
+  const state: TickerState = { total, byModel: new Map() };
+  states.set(container, state);
+  return state;
+}
 
-  const byModel = new Map<string, OdometerHandle>();
-  for (const m of models) {
-    const slot = container.querySelector<HTMLElement>(
-      `.ticker-count[data-model="${cssEscape(m.model)}"]`,
-    );
-    if (!slot) continue;
-    const odo = createOdometer();
-    slot.appendChild(odo.el);
-    byModel.set(m.model, odo);
-  }
-
-  states.set(container, { total, byModel });
-
-  // First paint: snap to the initial values (no multi-second roll on mount).
-  updateTokenTicker(container, summary, "snap");
+/** A single per-model row element (starts in the `entering` state). */
+function makeRow(model: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "ticker-row entering";
+  row.dataset.model = model;
+  row.innerHTML =
+    `<span class="ticker-model">${escapeHtml(shortModel(model))}</span>` +
+    `<span class="ticker-count" data-model="${escapeHtml(model)}"></span>`;
+  return row;
 }
 
 /**
- * Roll the total + per-model numbers toward the values in `summary`. Models
- * that appeared/disappeared between renders trigger a markup rebuild (preserving
- * the odometer handles of models that persist, so they roll rather than snap);
- * otherwise the numbers roll in place.
+ * Mount the ticker into `container` and roll up from 0 to the initial values.
+ * Tolerates null totals (shows 0) and null/empty byModel (shows a muted note).
+ */
+export function renderTokenTicker(container: HTMLElement, summary: Summary | null): void {
+  buildShell(container);
+  sync(container, summary, "snap", undefined);
+}
+
+/**
+ * Roll the total + per-model numbers toward the values in `summary`. New models
+ * animate IN, departed models animate OUT; persisting rows roll in place. The
+ * total reel is reused (never re-created). `totalOverride` lets the host drive a
+ * perpetually-creeping total while the per-model rows track their real values.
  */
 export function updateTokenTicker(
   container: HTMLElement,
@@ -130,95 +118,97 @@ export function updateTokenTicker(
   mode: TickerUpdateMode = "roll",
   totalOverride?: number,
 ): void {
-  const models = safeModels(summary);
-  const state = states.get(container);
-
-  // If there's no cached state, or the set of model rows no longer matches the
-  // DOM, rebuild markup (preserving persisting model odometers) first. A model
-  // set change is a structural shift, so snap the values into place.
-  const domRows = container.querySelectorAll<HTMLElement>(".ticker-row");
-  const domModels = Array.from(domRows, (r) => r.dataset.model ?? "");
-  const sameRows =
-    !!state &&
-    domModels.length === models.length &&
-    models.every((m, i) => m.model === domModels[i]);
-
-  if (!sameRows) {
-    rebuildPreserving(container, summary, models);
-    return;
+  // (Re)build the shell if it's missing (first call, or the host replaced it).
+  if (!states.get(container) || !container.querySelector("#ticker-total")) {
+    buildShell(container);
+    mode = "snap";
   }
-
-  // `totalOverride` lets the host drive a perpetually-creeping total (always
-  // rolling) while the per-model rows track their real values.
-  applyValue(state.total, totalOverride ?? safeTotal(summary), mode);
-  for (const m of models) {
-    const odo = state.byModel.get(m.model);
-    if (odo) applyValue(odo, m.tokens, mode);
-  }
+  sync(container, summary, mode, totalOverride);
 }
 
-/**
- * Rebuild the panel markup for a changed model set, re-using odometer handles
- * for models that persist so they keep rolling from their prior value. New
- * models get fresh odometers; departed models are dropped.
- */
-function rebuildPreserving(
+function sync(
   container: HTMLElement,
   summary: Summary | null,
-  models: ByModel[],
+  mode: TickerUpdateMode,
+  totalOverride: number | undefined,
 ): void {
-  const prev = states.get(container);
-  const prevByModel = prev?.byModel ?? new Map<string, OdometerHandle>();
+  const state = states.get(container)!;
+  applyValue(state.total, totalOverride ?? safeTotal(summary), mode);
+  syncRows(container, state, safeModels(summary), mode);
+}
 
-  const rows = models.length
-    ? models
-        .map(
-          (m) => `
-        <div class="ticker-row" data-model="${escapeHtml(m.model)}">
-          <span class="ticker-model">${escapeHtml(shortModel(m.model))}</span>
-          <span class="ticker-count" data-model="${escapeHtml(m.model)}"></span>
-        </div>`,
-        )
-        .join("")
-    : `<div class="ticker-empty">no model data</div>`;
+/** Reconcile the per-model rows by key: enter new, leave departed, roll persisting. */
+function syncRows(
+  container: HTMLElement,
+  state: TickerState,
+  models: ByModel[],
+  mode: TickerUpdateMode,
+): void {
+  const wrap = container.querySelector<HTMLElement>(".ticker-models");
+  if (!wrap) return;
 
-  // The model set changed, so the panel height changes — animate it smoothly
-  // (FLIP) instead of snapping the layout when the row count differs.
-  const byModel = new Map<string, OdometerHandle>();
-  let total = prev?.total ?? createOdometer({ reels: true });
-  animateHeightChange(container, () => {
-    container.innerHTML = `
-    <div class="ticker-total-wrap">
-      <span class="ticker-label">Total tokens · live</span>
-      <span class="ticker-total" id="ticker-total"></span>
-    </div>
-    <div class="ticker-models">${rows}</div>`;
-
-    // Re-use the total odometer if we had one; otherwise create it (reels).
-    total = prev?.total ?? total;
-    container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
-
-    for (const m of models) {
-      const slot = container.querySelector<HTMLElement>(
-        `.ticker-count[data-model="${cssEscape(m.model)}"]`,
-      );
-      if (!slot) continue;
-      const odo = prevByModel.get(m.model) ?? createOdometer();
-      slot.appendChild(odo.el);
-      byModel.set(m.model, odo);
+  // Empty state: animate any rows out and show the muted note.
+  if (!models.length) {
+    for (const row of wrap.querySelectorAll<HTMLElement>(".ticker-row:not(.leaving)")) {
+      leaveRow(row, state);
     }
-  });
+    if (!wrap.querySelector(".ticker-empty")) {
+      const note = document.createElement("div");
+      note.className = "ticker-empty";
+      note.textContent = "no model data";
+      wrap.appendChild(note);
+    }
+    return;
+  }
+  wrap.querySelector(".ticker-empty")?.remove();
 
-  states.set(container, { total, byModel });
+  const desired = new Set(models.map((m) => m.model));
 
-  // Structural rebuild: snap values into place rather than rolling.
-  total.snapTo(safeTotal(summary));
+  // LEAVE: rows whose model is gone collapse + fade, then are removed.
+  for (const row of wrap.querySelectorAll<HTMLElement>(".ticker-row:not(.leaving)")) {
+    if (!desired.has(row.dataset.model ?? "")) leaveRow(row, state);
+  }
+
+  // ENTER / persist, kept in the summary's (token-desc) order.
+  let anchor: HTMLElement | null = null;
   for (const m of models) {
-    byModel.get(m.model)?.snapTo(m.tokens);
+    let row = wrap.querySelector<HTMLElement>(
+      `.ticker-row[data-model="${cssEscape(m.model)}"]:not(.leaving)`,
+    );
+    if (!row) {
+      row = makeRow(m.model);
+      const odo = createOdometer();
+      row.querySelector<HTMLElement>(".ticker-count")!.appendChild(odo.el);
+      state.byModel.set(m.model, odo);
+      placeAfter(wrap, row, anchor);
+      revealOnNextFrame(row, "entering"); // expand + fade in
+    } else {
+      placeAfter(wrap, row, anchor);
+    }
+    const odo = state.byModel.get(m.model);
+    if (odo) applyValue(odo, m.tokens, mode);
+    anchor = row;
   }
 }
 
-/** Escape a model name for use inside a CSS attribute selector. */
-function cssEscape(value: string): string {
-  return value.replace(/["\\]/g, "\\$&");
+/** Move `row` to sit right after `anchor` (or first) only if it isn't already. */
+function placeAfter(wrap: HTMLElement, row: HTMLElement, anchor: HTMLElement | null): void {
+  if (anchor) {
+    if (anchor.nextElementSibling !== row) anchor.after(row);
+  } else if (wrap.firstElementChild !== row) {
+    wrap.prepend(row);
+  }
+}
+
+/** Collapse + fade a row out, dropping its odometer handle, then remove it. */
+function leaveRow(row: HTMLElement, state: TickerState): void {
+  if (row.classList.contains("leaving")) return;
+  state.byModel.delete(row.dataset.model ?? "");
+  row.classList.remove("entering");
+  row.classList.add("leaving");
+  if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+    window.setTimeout(() => row.remove(), ROW_LEAVE_MS);
+  } else {
+    row.remove();
+  }
 }
