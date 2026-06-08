@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { renderTokenTicker, updateTokenTicker } from "./token-ticker";
 import { mockSummary } from "../lib/api";
 import type { Summary } from "../lib/types";
@@ -7,34 +7,23 @@ function container(): HTMLElement {
   return document.createElement("div");
 }
 
-beforeEach(() => {
-  // Snap number tweens instantly so ticker text is final right after render
-  // (same reduced-motion stub used by the dashboard tests).
-  (window as unknown as { matchMedia: (q: string) => unknown }).matchMedia = (q: string) => ({
-    matches: true,
-    media: q,
-    addEventListener() {},
-    removeEventListener() {},
-    addListener() {},
-    removeListener() {},
-    onchange: null,
-    dispatchEvent() {
-      return false;
-    },
-  });
-});
+/** Read an odometer's displayed value via its data-value (the rolled digits
+ *  live in stacked glyph strips, so textContent isn't the displayed number). */
+function odoValue(el: Element | null): string | undefined {
+  return el?.querySelector<HTMLElement>(".odometer")?.dataset.value;
+}
 
 describe("renderTokenTicker", () => {
   it("renders the exact total with thousands separators", () => {
     const root = container();
     const summary = mockSummary("today");
     renderTokenTicker(root, summary);
-    expect(root.querySelector("#ticker-total")?.textContent).toBe(
+    expect(odoValue(root.querySelector("#ticker-total"))).toBe(
       summary.totals.tokens.toLocaleString("en-US"),
     );
   });
 
-  it("renders one row per model with exact ticking counts", () => {
+  it("renders one row per model with exact rolling counts", () => {
     const root = container();
     const summary = mockSummary("today");
     renderTokenTicker(root, summary);
@@ -42,7 +31,7 @@ describe("renderTokenTicker", () => {
     expect(rows.length).toBe(summary.byModel.length);
     // First model's exact count is shown with separators.
     const first = root.querySelector<HTMLElement>(".ticker-count");
-    expect(first?.textContent).toBe(summary.byModel[0].tokens.toLocaleString("en-US"));
+    expect(odoValue(first)).toBe(summary.byModel[0].tokens.toLocaleString("en-US"));
   });
 
   it("tolerates null totals and null byModel without throwing", () => {
@@ -56,14 +45,14 @@ describe("renderTokenTicker", () => {
       timeseries: null,
     } as unknown as Summary;
     expect(() => renderTokenTicker(root, summary)).not.toThrow();
-    expect(root.querySelector("#ticker-total")?.textContent).toBe("0");
+    expect(odoValue(root.querySelector("#ticker-total"))).toBe("0");
     expect(root.querySelector(".ticker-empty")?.textContent).toBe("no model data");
   });
 
   it("tolerates a fully null summary", () => {
     const root = container();
     expect(() => renderTokenTicker(root, null)).not.toThrow();
-    expect(root.querySelector("#ticker-total")?.textContent).toBe("0");
+    expect(odoValue(root.querySelector("#ticker-total"))).toBe("0");
   });
 });
 
@@ -78,7 +67,7 @@ describe("updateTokenTicker", () => {
       totals: { ...base.totals, tokens: base.totals.tokens + 12_345 },
     };
     updateTokenTicker(root, bumped);
-    expect(root.querySelector("#ticker-total")?.textContent).toBe(
+    expect(odoValue(root.querySelector("#ticker-total"))).toBe(
       bumped.totals.tokens.toLocaleString("en-US"),
     );
   });

@@ -365,11 +365,16 @@ body {
   line-height: 1;
   letter-spacing: -2px;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 32px rgba(255, 138, 92, 0.35);
+}
+/* Coral->gold gradient applied to the odometer glyphs (background-clip:text
+   only clips an element's OWN text, so it must live on the glyph spans). */
+.ticker-total .odo-glyph,
+.ticker-total .odo-sep {
   background: linear-gradient(90deg, #ffa074, var(--accent-deep) 45%, var(--gold));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  text-shadow: 0 0 32px rgba(255, 138, 92, 0.35);
 }
 .ticker-models {
   display: flex;
@@ -398,6 +403,41 @@ body {
   font-weight: 700;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+/* Rolling-digit odometer ------------------------------------------------- */
+/* A row of fixed-width digit cells (each clipping a vertical 0-9 strip) plus
+   static comma cells. Fixed-width cells + tabular-nums => zero horizontal
+   jitter while the digits roll. */
+.odometer {
+  display: inline-flex;
+  align-items: stretch;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.odo-digit {
+  display: inline-block;
+  overflow: hidden;
+  /* One glyph tall; width is one tabular digit (ch is exact under tabular-nums). */
+  height: 1em;
+  width: 0.62ch;
+  vertical-align: top;
+}
+.odo-strip {
+  display: flex;
+  flex-direction: column;
+  /* will-change hints WebView2 to keep this on its own layer for smooth rolls. */
+  will-change: transform;
+}
+.odo-glyph {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
+}
+.odo-sep {
+  display: inline-block;
+  vertical-align: top;
 }
 
 /* Session limits panel -------------------------------------------------- */

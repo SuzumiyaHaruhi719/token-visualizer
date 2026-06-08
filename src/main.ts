@@ -453,16 +453,29 @@ function setActiveTab(range: RangeKey): void {
   });
 }
 
-function renderSummary(summary: Summary): void {
+/**
+ * Update the NUMERIC readouts only (KPI tweens, cache panel, by-source split,
+ * token-ticker odometers). Cheap enough to run on the 2Hz heartbeat — does NOT
+ * touch the ECharts charts.
+ */
+function updateNumbers(summary: Summary): void {
   renderKpis(summary);
   renderCachePanel(summary);
   renderBySource(el("bysource"), summary.bySource as BySource[]);
   updateTokenTicker(el("token-ticker"), summary);
-  if (charts) {
-    renderTimeseries(charts.timeseries, summary);
-    renderDonut(charts.donut, summary);
-    renderProjects(charts.projects, summary);
-  }
+}
+
+/** Re-render the ECharts charts. Kept off the 2Hz loop (would thrash). */
+function updateCharts(summary: Summary): void {
+  if (!charts) return;
+  renderTimeseries(charts.timeseries, summary);
+  renderDonut(charts.donut, summary);
+  renderProjects(charts.projects, summary);
+}
+
+function renderSummary(summary: Summary): void {
+  updateNumbers(summary);
+  updateCharts(summary);
 }
 
 async function loadRange(range: RangeKey): Promise<void> {
@@ -476,6 +489,54 @@ async function loadRange(range: RangeKey): Promise<void> {
 async function refreshSummary(): Promise<void> {
   const summary = normalizeSummary(await getSummary(currentRange), currentRange);
   renderSummary(summary);
+}
+
+// --- 2Hz numeric heartbeat -------------------------------------------------
+// The user wants the readouts to BEAT in real time at a steady 2Hz, with the
+// odometers rolling. This loop re-fetches the summary (+ sessions) every 500ms
+// and updates ONLY the numeric readouts — the token-ticker odometers, the KPI
+// numbers, and the session-strip token counts. Charts are deliberately left to
+// the SSE/event path; re-rendering ECharts at 2Hz would thrash.
+//
+// Data-granularity reality: the underlying token totals only change when Claude
+// finishes a message (per-message granularity). 2Hz is purely the DISPLAY
+// cadence — between messages the numbers are identical and the odometer simply
+// holds (unchanged columns don't roll).
+const HEARTBEAT_MS = 500;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let heartbeatInFlight = false;
+
+/** One heartbeat tick: refresh numeric readouts only. Skipped while hidden. */
+async function heartbeatTick(): Promise<void> {
+  // Tray-first app: usually hidden. Don't hammer the DB/HTTP while hidden.
+  if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+    return;
+  }
+  if (heartbeatInFlight) return; // never let ticks overlap on a slow fetch
+  heartbeatInFlight = true;
+  try {
+    const [summary, sessions] = await Promise.all([
+      getSummary(currentRange),
+      getSessions(),
+    ]);
+    updateNumbers(normalizeSummary(summary, currentRange));
+    renderSessions(sessions);
+  } finally {
+    heartbeatInFlight = false;
+  }
+}
+
+/** Start the steady 2Hz numeric refresh loop (idempotent). */
+function startHeartbeat(): void {
+  if (typeof setInterval !== "function" || heartbeatTimer !== null) return;
+  heartbeatTimer = setInterval(() => void heartbeatTick(), HEARTBEAT_MS);
+  // Fetch immediately when the dashboard becomes visible again so the numbers
+  // are fresh the instant the user looks, rather than up to 500ms stale.
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void heartbeatTick();
+    });
+  }
 }
 
 let lastLimits: Limits | null = null;
@@ -552,6 +613,9 @@ async function bootstrap(): Promise<void> {
   }
 
   subscribe(handleEvent);
+
+  // Steady 2Hz display heartbeat (visibility-gated) on top of the event stream.
+  startHeartbeat();
 }
 
 function autostart(): void {
