@@ -624,9 +624,6 @@ async function loadRange(range: RangeKey): Promise<void> {
   setActiveTab(range);
   const summary = normalizeSummary(await getSummary(range), range);
   if (seq !== loadSeq) return; // superseded by a newer tab switch — drop this stale result
-  // Restart the perpetual creep from the new range's total so the heartbeat
-  // doesn't keep an old (much larger) range's floor.
-  rollFloor = summary.totals.tokens;
   // Seamless tab switch: the total TRANSITIONS (a quick fixed-duration roll) to
   // the new range's total. The heartbeat keeps running — its raise-only creep
   // can't disturb a downward spin and just resumes the roll once the transition
@@ -651,22 +648,15 @@ async function refreshSummary(): Promise<void> {
 // finishes a message (per-message granularity). 2Hz is purely the DISPLAY
 // cadence — between messages the numbers are identical and the odometer simply
 // holds (unchanged columns don't roll).
-const HEARTBEAT_MS = 500;
-// Per-tick bump to the big-total roll floor while a session is active, so the
-// slot machine keeps spinning even when no new tokens have landed yet (the
-// underlying total only changes per completed message). Real jumps outpace this;
-// during lulls this gentle creep keeps the roll alive. Latency/exactness does
-// not matter here (the user wants perpetual motion).
-const TOTAL_CREEP_PER_TICK = 90;
+// Heartbeat cadence. A modest 1.5s safety refresh on top of the SSE stream —
+// NOT a per-frame perpetual animation. (An earlier build kept a 2Hz creep that
+// fed the odometer an ever-rising target so its rAF ran FOREVER; combined with
+// the glow/blur/mask compositing that saturated WebView2 and froze the whole
+// dashboard. The number now rolls silkily toward the REAL total on each update
+// and CONVERGES + stops, freeing the event loop, so the UI stays responsive.)
+const HEARTBEAT_MS = 1500;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatInFlight = false;
-// The perpetually-rising display target for the big total (>= the real total).
-let rollFloor = 0;
-
-/** A session whose work is in flight (so the total should keep rolling). */
-function isActiveKind(kind: SessionState["state"]["kind"]): boolean {
-  return kind !== "idle" && kind !== "sleeping";
-}
 
 /** One heartbeat tick: refresh numeric readouts only. Skipped while hidden. */
 async function heartbeatTick(): Promise<void> {
@@ -681,15 +671,9 @@ async function heartbeatTick(): Promise<void> {
       getSummary(currentRange),
       getSessions(),
     ]);
-    const norm = normalizeSummary(summary, currentRange);
-    const realTotal = norm.totals.tokens;
-    const active = sessions.some((s) => isActiveKind(s.state.kind));
-    // While a session is active, keep the big total perpetually creeping up so
-    // the reels never stop; idle settles it to the real total.
-    rollFloor = active ? Math.max(rollFloor, realTotal) + TOTAL_CREEP_PER_TICK : realTotal;
-    // "roll": setTarget eases UP toward the (creeping) floor — raise-only, so it
-    // never snaps backward. Per-model rows track their real values.
-    updateNumbers(norm, "roll", rollFloor);
+    // Roll toward the real total; setTarget eases up and converges (stops),
+    // so there is no perpetually-running animation frame.
+    updateNumbers(normalizeSummary(summary, currentRange), "roll");
     renderSessions(sessions);
   } finally {
     heartbeatInFlight = false;
