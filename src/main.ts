@@ -551,11 +551,15 @@ function positionRangeIndicator(range: RangeKey): void {
  */
 type TickerMode = "roll" | "snap" | "transition";
 
-function updateNumbers(summary: Summary, tickerMode: TickerMode = "roll"): void {
+function updateNumbers(
+  summary: Summary,
+  tickerMode: TickerMode = "roll",
+  totalOverride?: number,
+): void {
   renderKpis(summary);
   renderCachePanel(summary);
   renderBySource(el("bysource"), summary.bySource as BySource[]);
-  updateTokenTicker(el("token-ticker"), summary, tickerMode);
+  updateTokenTicker(el("token-ticker"), summary, tickerMode, totalOverride);
 }
 
 /** Re-render the ECharts charts. Kept off the 2Hz loop (would thrash). */
@@ -566,8 +570,12 @@ function updateCharts(summary: Summary): void {
   renderProjects(charts.projects, summary);
 }
 
-function renderSummary(summary: Summary, tickerMode: TickerMode = "roll"): void {
-  updateNumbers(summary, tickerMode);
+function renderSummary(
+  summary: Summary,
+  tickerMode: TickerMode = "roll",
+  totalOverride?: number,
+): void {
+  updateNumbers(summary, tickerMode, totalOverride);
   updateCharts(summary);
 }
 
@@ -575,13 +583,14 @@ async function loadRange(range: RangeKey): Promise<void> {
   currentRange = range;
   setActiveTab(range);
   const summary = normalizeSummary(await getSummary(range), range);
-  // Seamless tab switch: the odometers TRANSITION (a quick ~1s bidirectional
-  // roll) to the new range's total instead of snapping/freezing — the slot
-  // machine spins to the new value with no stop.
+  // Restart the perpetual creep from the new range's total so the heartbeat
+  // doesn't keep an old (much larger) range's floor.
+  rollFloor = summary.totals.tokens;
+  // Seamless tab switch: the total TRANSITIONS (a quick ~1s bidirectional roll,
+  // opening the odometer's fast window) to the new range's total. The heartbeat
+  // keeps running — its raise-only creep can't disturb a downward spin and just
+  // resumes the upward roll once the transition lands, so there is no pause.
   renderSummary(summary, "transition");
-  // Let that transition play out uninterrupted: the 2Hz heartbeat would
-  // otherwise re-target the odometers (slow roll / downward snap) mid-spin.
-  tabTransitionUntil = Date.now() + 1100;
 }
 
 /** Re-fetch the current range's summary and re-render KPIs + charts in place. */
@@ -602,11 +611,21 @@ async function refreshSummary(): Promise<void> {
 // cadence — between messages the numbers are identical and the odometer simply
 // holds (unchanged columns don't roll).
 const HEARTBEAT_MS = 500;
+// Per-tick bump to the big-total roll floor while a session is active, so the
+// slot machine keeps spinning even when no new tokens have landed yet (the
+// underlying total only changes per completed message). Real jumps outpace this;
+// during lulls this gentle creep keeps the roll alive. Latency/exactness does
+// not matter here (the user wants perpetual motion).
+const TOTAL_CREEP_PER_TICK = 90;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatInFlight = false;
-// While a tab-switch transition is playing, the heartbeat holds off so it does
-// not re-target the odometers mid-spin (which would slow or snap the roll).
-let tabTransitionUntil = 0;
+// The perpetually-rising display target for the big total (>= the real total).
+let rollFloor = 0;
+
+/** A session whose work is in flight (so the total should keep rolling). */
+function isActiveKind(kind: SessionState["state"]["kind"]): boolean {
+  return kind !== "idle" && kind !== "sleeping";
+}
 
 /** One heartbeat tick: refresh numeric readouts only. Skipped while hidden. */
 async function heartbeatTick(): Promise<void> {
@@ -614,7 +633,6 @@ async function heartbeatTick(): Promise<void> {
   if (typeof document !== "undefined" && document.visibilityState !== "visible") {
     return;
   }
-  if (Date.now() < tabTransitionUntil) return; // let a tab transition finish
   if (heartbeatInFlight) return; // never let ticks overlap on a slow fetch
   heartbeatInFlight = true;
   try {
@@ -622,9 +640,15 @@ async function heartbeatTick(): Promise<void> {
       getSummary(currentRange),
       getSessions(),
     ]);
-    // "roll": feed setTarget so the odometers perpetually ease UP toward the
-    // freshest total (latency does not matter — the readout keeps climbing).
-    updateNumbers(normalizeSummary(summary, currentRange), "roll");
+    const norm = normalizeSummary(summary, currentRange);
+    const realTotal = norm.totals.tokens;
+    const active = sessions.some((s) => isActiveKind(s.state.kind));
+    // While a session is active, keep the big total perpetually creeping up so
+    // the reels never stop; idle settles it to the real total.
+    rollFloor = active ? Math.max(rollFloor, realTotal) + TOTAL_CREEP_PER_TICK : realTotal;
+    // "roll": setTarget eases UP toward the (creeping) floor — raise-only, so it
+    // never snaps backward. Per-model rows track their real values.
+    updateNumbers(norm, "roll", rollFloor);
     renderSessions(sessions);
   } finally {
     heartbeatInFlight = false;

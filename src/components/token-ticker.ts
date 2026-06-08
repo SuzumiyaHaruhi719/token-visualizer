@@ -127,6 +127,7 @@ export function updateTokenTicker(
   container: HTMLElement,
   summary: Summary | null,
   mode: TickerUpdateMode = "roll",
+  totalOverride?: number,
 ): void {
   const models = safeModels(summary);
   const state = states.get(container);
@@ -146,7 +147,9 @@ export function updateTokenTicker(
     return;
   }
 
-  applyValue(state.total, safeTotal(summary), mode);
+  // `totalOverride` lets the host drive a perpetually-creeping total (always
+  // rolling) while the per-model rows track their real values.
+  applyValue(state.total, totalOverride ?? safeTotal(summary), mode);
   for (const m of models) {
     const odo = state.byModel.get(m.model);
     if (odo) applyValue(odo, m.tokens, mode);

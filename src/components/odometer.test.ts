@@ -63,10 +63,12 @@ describe("createOdometer — continuous driver", () => {
     expect(odo.value()).toBe(305);
   });
 
-  it("snaps immediately on a downward target (range switch)", () => {
+  it("ignores a downward setTarget (raise-only live roll), but transitionTo goes down", () => {
     const odo = createOdometer();
     odo.snapTo(900);
-    odo.setTarget(200);
+    odo.setTarget(200); // raise-only: a lower live value is ignored, not snapped
+    expect(odo.el.dataset.value).toBe("900");
+    odo.transitionTo(200); // tab switch handles downward
     expect(odo.el.dataset.value).toBe("200");
     expect(odo.value()).toBe(200);
   });

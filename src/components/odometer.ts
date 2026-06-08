@@ -29,6 +29,7 @@ import { formatInt } from "../lib/format";
 // in ~1s instead of snapping — a seamless hand-off, no stop.
 const TAU_MS = 2000;
 const TAU_FAST_MS = 320;
+const FAST_WINDOW_MS = 1300; // how long a tab-switch transition stays fast
 const MIN_UNITS_PER_SEC = 8;
 const CONVERGE_EPSILON = 1;
 const NOMINAL_FRAME_MS = 16.6667;
@@ -98,8 +99,18 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   let latest = 0; // most recent target (returned by value())
   let frame = 0; // active rAF handle (0 == not scheduled)
   let lastTime: number | null = null; // previous frame timestamp for dt
-  let tau = TAU_MS; // current ease time-constant (slow roll vs fast transition)
+  // While `now < fastUntil` the ease uses TAU_FAST (a tab-switch transition);
+  // otherwise the slow live-roll TAU. Computed per-frame so a heartbeat update
+  // mid-transition never downgrades the speed.
+  let fastUntil = 0;
   let strips: HTMLElement[] = []; // reel strips, units-first (reels mode only)
+
+  /** Monotonic clock shared with the rAF timestamp (performance.now based). */
+  function clock(): number {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+  }
 
   // --- reel rendering -----------------------------------------------------
   function buildStrip(): HTMLElement {
@@ -204,6 +215,8 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
       return;
     }
 
+    // Fast during a tab-switch transition window, slow for live rolls.
+    const tau = now < fastUntil ? TAU_FAST_MS : TAU_MS;
     // Exponential approach (works both directions for tab-switch transitions),
     // with a velocity floor so the tail still visibly rolls.
     let move = gap * (1 - Math.exp(-dt / tau));
@@ -244,11 +257,13 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
 
   function setTarget(n: number): void {
     const v = sanitize(n);
-    tau = TAU_MS; // slow continuous roll for live increments
-    if (v < displayed) {
-      snapTo(v); // live totals only grow; a smaller value means a context reset
-      return;
-    }
+    // Raise-only: live/creep totals only grow. A target at or below the current
+    // value is ignored (keeps any in-flight roll going) rather than snapping
+    // backward — so the perpetual creep that drives the always-on roll is never
+    // yanked back when a slightly-lower real total arrives, and a live update
+    // never disturbs a downward tab-switch transition. (Range switches go
+    // through transitionTo, which handles downward moves.)
+    if (v <= displayed) return;
     latest = v;
     start();
   }
@@ -256,11 +271,12 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   /**
    * Roll quickly (and bidirectionally) toward `n` over ~1s — used on a tab
    * switch so the number smoothly hands off to the new range's total instead of
-   * freezing/snapping. Rolls UP (slot-machine spin) or DOWN as needed.
+   * freezing/snapping. Opens a fast window so the ease is quick even if the live
+   * heartbeat also updates the target mid-spin. Rolls UP or DOWN as needed.
    */
   function transitionTo(n: number): void {
     const v = sanitize(n);
-    tau = TAU_FAST_MS;
+    fastUntil = clock() + FAST_WINDOW_MS;
     if (v === displayed) {
       render();
       return;
