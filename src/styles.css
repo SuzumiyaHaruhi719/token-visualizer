@@ -25,6 +25,11 @@
   --radius: 16px;
   --gap: 18px;
   --blur: blur(26px) saturate(165%);
+  --ease-premium: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-premium-pop: cubic-bezier(0.2, 0.9, 0.22, 1);
+  --dur-fast: 180ms;
+  --dur-med: 280ms;
+  --dur-slow: 420ms;
 
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
@@ -439,29 +444,54 @@ body {
    a 1-glyph window onto a vertical 0-9 strip that rolls; commas are static. */
 .odometer-reels {
   display: inline-flex;
-  align-items: stretch;
+  align-items: flex-start;
   line-height: 1;
 }
 .odometer-reels .odo-digit {
   display: inline-block;
-  overflow: hidden; /* clip the strip to a single glyph */
-  height: 1em;
+  overflow: hidden; /* clip the strip to a single glyph, softened by the mask */
+  height: 1.18em;
+  padding-block: 0.09em;
   width: 1ch; /* one full tabular digit advance — no horizontal squish */
   vertical-align: top;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  transition:
+    width var(--dur-med) var(--ease-premium-pop),
+    opacity var(--dur-med) var(--ease-premium),
+    transform var(--dur-med) var(--ease-premium-pop);
+  will-change: width, opacity, transform;
 }
 .odometer-reels .odo-strip {
   display: flex;
   flex-direction: column;
+  will-change: transform;
 }
 .odometer-reels .odo-glyph {
   display: block;
+  flex: 0 0 1em;
   height: 1em;
-  line-height: 1;
+  line-height: 1.08;
   text-align: center;
 }
 .odometer-reels .odo-sep {
   display: inline-block;
   vertical-align: top;
+  width: 0.38ch;
+  height: 1.18em;
+  line-height: 1.08;
+  overflow: hidden;
+  text-align: center;
+  transition:
+    width var(--dur-med) var(--ease-premium-pop),
+    opacity var(--dur-med) var(--ease-premium),
+    transform var(--dur-med) var(--ease-premium-pop);
+  will-change: width, opacity, transform;
+}
+.odometer-reels .odo-enter {
+  width: 0;
+  opacity: 0;
+  transform: translateY(0.18em) scale(0.96);
 }
 
 /* Session limits panel -------------------------------------------------- */

@@ -113,9 +113,17 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   }
 
   // --- reel rendering -----------------------------------------------------
-  function buildStrip(): HTMLElement {
+  function revealEnteringCell(cell: HTMLElement): void {
+    if (typeof requestAnimationFrame !== "function") {
+      cell.classList.remove("odo-enter");
+      return;
+    }
+    requestAnimationFrame(() => cell.classList.remove("odo-enter"));
+  }
+
+  function buildStrip(entering = false): HTMLElement {
     const cell = document.createElement("span");
-    cell.className = "odo-digit";
+    cell.className = entering ? "odo-digit odo-enter" : "odo-digit";
     const strip = document.createElement("span");
     strip.className = "odo-strip";
     for (let d = 0; d < STRIP_GLYPHS; d++) {
@@ -125,6 +133,7 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
       strip.appendChild(glyph);
     }
     cell.appendChild(strip);
+    if (entering) revealEnteringCell(cell);
     return cell;
   }
 
@@ -149,15 +158,17 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
   /** Rebuild reel cells for `count` digits, reusing persisting strips. */
   function rebuildReels(count: number): void {
     const cells = layoutFor(count, groupSeparator);
+    const animateStructuralEntry = root.childElementCount > 0;
     root.textContent = "";
     const prev = strips;
     const next: HTMLElement[] = [];
     for (const cell of cells) {
       if (cell.kind === "sep") {
         const sep = document.createElement("span");
-        sep.className = "odo-sep";
+        sep.className = animateStructuralEntry ? "odo-sep odo-enter" : "odo-sep";
         sep.textContent = ",";
         root.appendChild(sep);
+        if (animateStructuralEntry) revealEnteringCell(sep);
         continue;
       }
       const existing = prev[cell.place];
@@ -165,7 +176,7 @@ export function createOdometer(opts: OdometerOptions = {}): OdometerHandle {
         root.appendChild(existing.parentElement as HTMLElement);
         next[cell.place] = existing;
       } else {
-        const digitCell = buildStrip();
+        const digitCell = buildStrip(animateStructuralEntry);
         root.appendChild(digitCell);
         next[cell.place] = digitCell.querySelector<HTMLElement>(".odo-strip")!;
       }
