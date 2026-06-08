@@ -86,4 +86,43 @@ describe("createOdometer — continuous driver", () => {
     expect(odo.el.dataset.value).toBe("54,321");
     expect(odo.value()).toBe(54321);
   });
+
+  it("rolls through many smooth, gradually-increasing frames (not a snap)", () => {
+    // Drive real ~16ms frames (instead of the global huge-step stub) to observe
+    // the in-flight motion: a single update must roll gradually over many frames,
+    // strictly increasing, without jumping straight to the target.
+    const real = globalThis.requestAnimationFrame;
+    let pending: FrameRequestCallback | null = null;
+    globalThis.requestAnimationFrame = ((fn: FrameRequestCallback) => {
+      pending = fn;
+      return 1;
+    }) as typeof globalThis.requestAnimationFrame;
+    try {
+      const odo = createOdometer();
+      odo.snapTo(1_000_000);
+      odo.setTarget(2_000_000);
+
+      const frames: number[] = [];
+      let t = 0;
+      for (let i = 0; i < 120 && pending; i++) {
+        const cb = pending;
+        pending = null;
+        t += 16.7;
+        cb(t);
+        frames.push(Number((odo.el.dataset.value ?? "0").replace(/,/g, "")));
+      }
+
+      expect(frames.length).toBeGreaterThan(60); // didn't converge in a few frames
+      expect(frames[0]).toBeGreaterThan(1_000_000); // moved off the start
+      expect(frames[0]).toBeLessThan(1_300_000); // but did NOT jump near the target
+      for (let i = 1; i < frames.length; i++) {
+        expect(frames[i]).toBeGreaterThanOrEqual(frames[i - 1]); // monotonic up
+      }
+      const last = frames[frames.length - 1];
+      expect(last).toBeGreaterThan(1_500_000); // made real progress over ~2s
+      expect(last).toBeLessThan(2_000_000); // still rolling — continuous, not done
+    } finally {
+      globalThis.requestAnimationFrame = real;
+    }
+  });
 });
