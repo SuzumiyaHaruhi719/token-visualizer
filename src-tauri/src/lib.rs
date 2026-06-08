@@ -73,10 +73,14 @@ pub fn run() {
             let prices = load_prices();
             let state = AppState::new(db_path.clone(), prices);
 
-            // Persisted on/off toggle for desktop pets, shared with the
-            // state-poll loop (reader) and the tray menu (writer).
+            // Persisted on/off toggles shared with the relevant subsystems
+            // (state-poll/tray for pets, tray for the monitor popover).
+            let saved_settings = settings::load();
             let pets_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                settings::load().pets_enabled,
+                saved_settings.pets_enabled,
+            ));
+            let monitor_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                saved_settings.monitor_enabled,
             ));
 
             // --- resolve the built frontend dir ------------------------------
@@ -127,7 +131,7 @@ pub fn run() {
             windows::create_dashboard(&handle, port)?;
             // Tray current-session popover: created hidden, toggled on tray click.
             windows::create_popover(&handle, port)?;
-            tray::build(&handle, port, pets_enabled.clone())?;
+            tray::build(&handle, port, pets_enabled.clone(), monitor_enabled.clone())?;
 
             Ok(())
         })

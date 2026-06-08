@@ -2,10 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Core permissions for the dashboard and per-session pet windows.",
-  "windows": ["dashboard", "pet-*"],
+  "windows": ["dashboard", "pet-*", "popover"],
   "permissions": [
     "core:default",
     "opener:default",
-    "notification:default"
+    "notification:default",
+    "core:window:allow-start-dragging"
   ]
 }

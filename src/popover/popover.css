@@ -25,6 +25,16 @@ body {
   width: 100%;
   height: 100%;
   padding: 6px;
+  cursor: grab; /* draggable: data-tauri-drag-region is on this element */
+}
+#popover:active {
+  cursor: grabbing;
+}
+/* The popover has no interactive elements, so let every mousedown fall through
+   to #popover (the drag region) — this makes the whole card draggable, not
+   just the padding gaps between the text spans. */
+#popover * {
+  pointer-events: none;
 }
 
 .pop-card {

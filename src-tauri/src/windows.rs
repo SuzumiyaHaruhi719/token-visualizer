@@ -9,7 +9,9 @@
 use std::collections::HashSet;
 
 use cmcore::model::SessionState;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+use crate::settings::{self, Settings};
 
 /// The dashboard window label.
 pub const DASHBOARD_LABEL: &str = "dashboard";
@@ -148,28 +150,82 @@ pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Toggle the tray current-session popover: if it exists and is visible, hide
-/// it; otherwise (re)create it, reposition to the bottom-right, show + focus.
-/// Called from the tray's LEFT-click handler.
+/// Toggle the tray current-session popover: if it exists and is visible, save
+/// its position and hide it; otherwise (re)create it, restore the user's saved
+/// position (or anchor bottom-right), show + focus. Called from the tray's
+/// LEFT-click handler.
 pub fn toggle_popover(app: &AppHandle, port: u16) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {
+            save_popover_position(&win);
             let _ = win.hide();
             return;
         }
-        // Re-anchor in case the display layout changed since creation.
-        let (x, y) = popover_position(app);
-        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        position_popover(app, &win);
         let _ = win.show();
         let _ = win.set_focus();
         return;
     }
     if create_popover(app, port).is_ok() {
         if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+            position_popover(app, &win);
             let _ = win.show();
             let _ = win.set_focus();
         }
     }
+}
+
+/// Hide the popover if it is currently visible (used when the monitor toggle is
+/// switched off). Saves the position first so re-enabling restores it.
+pub fn hide_popover(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+        if win.is_visible().unwrap_or(false) {
+            save_popover_position(&win);
+            let _ = win.hide();
+        }
+    }
+}
+
+/// Place the popover at the user's saved drag position if it is on a connected
+/// monitor; otherwise anchor it to the primary monitor's bottom-right corner.
+fn position_popover(app: &AppHandle, win: &WebviewWindow) {
+    let saved = settings::load();
+    if let (Some(x), Some(y)) = (saved.popover_x, saved.popover_y) {
+        if position_on_some_monitor(app, x, y) {
+            let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+            return;
+        }
+        // Saved spot is off-screen now (e.g. a monitor was unplugged) — fall
+        // through to the safe bottom-right anchor so the popover is reachable.
+    }
+    let (x, y) = popover_position(app);
+    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+}
+
+/// Persist the popover's current top-left (physical px) so the next open
+/// restores where the user dragged it.
+fn save_popover_position(win: &WebviewWindow) {
+    if let Ok(pos) = win.outer_position() {
+        let updated = Settings {
+            popover_x: Some(pos.x as f64),
+            popover_y: Some(pos.y as f64),
+            ..settings::load()
+        };
+        settings::save(&updated);
+    }
+}
+
+/// True if physical point `(x, y)` lies within any connected monitor's bounds.
+fn position_on_some_monitor(app: &AppHandle, x: f64, y: f64) -> bool {
+    let Ok(monitors) = app.available_monitors() else {
+        return true; // can't tell — trust the saved value rather than fight it
+    };
+    monitors.iter().any(|m| {
+        let p = m.position();
+        let s = m.size();
+        let (mx, my) = (p.x as f64, p.y as f64);
+        x >= mx && y >= my && x < mx + s.width as f64 && y < my + s.height as f64
+    })
 }
 
 /// Close every open pet window (labels prefixed with [`PET_LABEL_PREFIX`]).

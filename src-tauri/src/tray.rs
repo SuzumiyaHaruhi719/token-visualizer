@@ -19,6 +19,8 @@ use crate::windows;
 const ID_OPEN: &str = "open_dashboard";
 /// Menu item id: toggle desktop pets on/off.
 const ID_PETS: &str = "toggle_pets";
+/// Menu item id: toggle the tray current-session monitor popover on/off.
+const ID_MONITOR: &str = "toggle_monitor";
 /// Menu item id: quit the app.
 const ID_QUIT: &str = "quit";
 
@@ -28,7 +30,12 @@ pub const TRAY_ID: &str = "cm-tray";
 /// Build the tray icon with its menu. `port` is captured so "Open Dashboard"
 /// can (re)create the dashboard window against the running server. `pets_enabled`
 /// is the shared toggle the "Show Desktop Pets" check item drives.
-pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri::Result<TrayIcon> {
+pub fn build(
+    app: &AppHandle,
+    port: u16,
+    pets_enabled: Arc<AtomicBool>,
+    monitor_enabled: Arc<AtomicBool>,
+) -> tauri::Result<TrayIcon> {
     let open_item = MenuItem::with_id(app, ID_OPEN, "Open Dashboard", true, None::<&str>)?;
     let pets_item = CheckMenuItem::with_id(
         app,
@@ -38,10 +45,20 @@ pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri
         pets_enabled.load(Ordering::Relaxed),
         None::<&str>,
     )?;
+    let monitor_item = CheckMenuItem::with_id(
+        app,
+        ID_MONITOR,
+        "Show Tray Monitor",
+        true,
+        monitor_enabled.load(Ordering::Relaxed),
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, ID_QUIT, "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &pets_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &pets_item, &monitor_item, &quit_item])?;
 
     let pets_item_cb = pets_item.clone();
+    let monitor_item_cb = monitor_item.clone();
+    let monitor_for_menu = monitor_enabled.clone();
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -64,12 +81,27 @@ pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri
                 }
                 // when re-enabled, the state-poll loop respawns pets within ~1s
             }
+            ID_MONITOR => {
+                let new = !monitor_for_menu.load(Ordering::Relaxed);
+                monitor_for_menu.store(new, Ordering::Relaxed);
+                let updated = Settings {
+                    monitor_enabled: new,
+                    ..settings::load()
+                };
+                settings::save(&updated);
+                let _ = monitor_item_cb.set_checked(new);
+                if !new {
+                    // Hide an open popover immediately when disabled.
+                    windows::hide_popover(app);
+                }
+            }
             ID_QUIT => app.exit(0),
             _ => {}
         })
-        // LEFT-click (button release) toggles the current-session popover. The
-        // context menu still opens on RIGHT-click (`show_menu_on_left_click`
-        // stays false), so left vs. right are distinct gestures.
+        // LEFT-click (button release) toggles the current-session popover, but
+        // only when the monitor is enabled. The context menu still opens on
+        // RIGHT-click (`show_menu_on_left_click` stays false), so left vs. right
+        // are distinct gestures.
         .on_tray_icon_event(move |tray, event| {
             if matches!(
                 event,
@@ -78,7 +110,8 @@ pub fn build(app: &AppHandle, port: u16, pets_enabled: Arc<AtomicBool>) -> tauri
                     button_state: tauri::tray::MouseButtonState::Up,
                     ..
                 }
-            ) {
+            ) && monitor_enabled.load(Ordering::Relaxed)
+            {
                 windows::toggle_popover(tray.app_handle(), port);
             }
         });

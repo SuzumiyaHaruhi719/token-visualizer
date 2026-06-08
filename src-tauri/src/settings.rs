@@ -7,6 +7,16 @@ use std::path::PathBuf;
 pub struct Settings {
     #[serde(default = "default_true")]
     pub pets_enabled: bool,
+    /// Whether the tray "current session" monitor popover is enabled. When off,
+    /// left-clicking the tray icon does nothing (and any open popover is hidden).
+    #[serde(default = "default_true")]
+    pub monitor_enabled: bool,
+    /// Last on-screen position (physical px) the user dragged the popover to.
+    /// `None` until first drag → popover anchors to the bottom-right corner.
+    #[serde(default)]
+    pub popover_x: Option<f64>,
+    #[serde(default)]
+    pub popover_y: Option<f64>,
     /// Whether to publish today's token total to Discord Rich Presence.
     /// Off by default; only takes effect when a `discord_client_id` is also set.
     #[serde(default)]
@@ -25,6 +35,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             pets_enabled: true,
+            monitor_enabled: true,
+            popover_x: None,
+            popover_y: None,
             discord_enabled: false,
             discord_client_id: None,
         }
@@ -75,5 +88,20 @@ mod tests {
     fn missing_field_defaults_to_true() {
         let back: Settings = serde_json::from_str("{}").unwrap();
         assert!(back.pets_enabled);
+        assert!(back.monitor_enabled);
+        assert_eq!(back.popover_x, None);
+        assert_eq!(back.popover_y, None);
+    }
+
+    #[test]
+    fn popover_position_round_trips() {
+        let s = Settings {
+            popover_x: Some(1280.0),
+            popover_y: Some(40.0),
+            ..Settings::default()
+        };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.popover_x, Some(1280.0));
+        assert_eq!(back.popover_y, Some(40.0));
     }
 }
