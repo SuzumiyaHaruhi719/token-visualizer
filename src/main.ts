@@ -8,6 +8,7 @@ import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
 import { animateNumber } from "./lib/tween";
 import { renderLimits, tickCountdowns } from "./components/limits";
 import { renderBySource } from "./components/by-source";
+import { renderTokenTicker, updateTokenTicker } from "./components/token-ticker";
 import type {
   Summary,
   SessionState,
@@ -77,6 +78,8 @@ function renderShell(root: HTMLElement): void {
     <section class="bysource" id="bysource">
       <span class="bysource-empty">No source data</span>
     </section>
+
+    <section class="panel panel-wide ticker-panel" id="token-ticker"></section>
 
     <section class="panel panel-wide">
       <h2 class="panel-title">Token usage over time</h2>
@@ -408,6 +411,7 @@ function renderSummary(summary: Summary): void {
   renderKpis(summary);
   renderCachePanel(summary);
   renderBySource(el("bysource"), summary.bySource as BySource[]);
+  updateTokenTicker(el("token-ticker"), summary);
   if (charts) {
     renderTimeseries(charts.timeseries, summary);
     renderDonut(charts.donut, summary);
@@ -474,6 +478,7 @@ async function bootstrap(): Promise<void> {
   const root = el("app");
   renderShell(root);
   charts = initCharts();
+  renderTokenTicker(el("token-ticker"), null);
 
   el("range-tabs").addEventListener("click", (e) => {
     const target = (e.target as HTMLElement).closest<HTMLButtonElement>(".range-tab");

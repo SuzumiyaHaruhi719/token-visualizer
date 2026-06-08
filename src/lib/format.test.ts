@@ -61,11 +61,21 @@ describe("formatPct", () => {
 });
 
 describe("formatInt", () => {
-  it("adds thousands separators", () => {
-    expect(formatInt(12345)).toBe("12,345");
+  it("shows zero and small counts exactly", () => {
+    expect(formatInt(0)).toBe("0");
     expect(formatInt(37)).toBe("37");
   });
-  it("returns dash for null", () => {
+  it("adds thousands separators", () => {
+    expect(formatInt(12345)).toBe("12,345");
+    expect(formatInt(14_686_055_640)).toBe("14,686,055,640");
+  });
+  it("rounds fractional (mid-tween) values to the ones digit", () => {
+    expect(formatInt(1234.4)).toBe("1,234");
+    expect(formatInt(1234.6)).toBe("1,235");
+  });
+  it("returns dash for null/undefined/NaN", () => {
     expect(formatInt(null)).toBe("—");
+    expect(formatInt(undefined)).toBe("—");
+    expect(formatInt(NaN)).toBe("—");
   });
 });

@@ -330,6 +330,65 @@ body {
 .bysource-swatch.bysource-claude { background: var(--accent); box-shadow: 0 0 8px rgba(255, 138, 92, 0.6); }
 .bysource-swatch.bysource-codex { background: var(--teal); box-shadow: 0 0 8px rgba(84, 210, 180, 0.6); }
 
+/* Live token ticker ------------------------------------------------------ */
+.ticker-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ticker-total-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ticker-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-faint);
+}
+.ticker-total {
+  font-size: clamp(2.4rem, 6vw, 4.2rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -2px;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(90deg, #ffa074, var(--accent-deep) 45%, var(--gold));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 32px rgba(255, 138, 92, 0.35);
+}
+.ticker-models {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 230px;
+  overflow-y: auto;
+}
+.ticker-empty { color: var(--text-faint); font-size: 0.82rem; }
+.ticker-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 9px 13px;
+  border-radius: 11px;
+  background: var(--glass-2);
+  box-shadow: inset 0 0 0 1px var(--glass-border);
+}
+.ticker-model {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--gold);
+}
+.ticker-count {
+  margin-left: auto;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Session limits panel -------------------------------------------------- */
 .limits-grid {
   display: grid;
