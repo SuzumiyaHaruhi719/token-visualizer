@@ -12,6 +12,7 @@
 
 import type { Summary, ByModel } from "../lib/types";
 import { createOdometer, type OdometerHandle } from "./odometer";
+import { animateHeightChange } from "../lib/motion";
 
 // How a number update is applied to its odometer:
 //  - "roll": slowly ease UP toward the value (live increments within a range).
@@ -181,27 +182,32 @@ function rebuildPreserving(
         .join("")
     : `<div class="ticker-empty">no model data</div>`;
 
-  container.innerHTML = `
+  // The model set changed, so the panel height changes — animate it smoothly
+  // (FLIP) instead of snapping the layout when the row count differs.
+  const byModel = new Map<string, OdometerHandle>();
+  let total = prev?.total ?? createOdometer({ reels: true });
+  animateHeightChange(container, () => {
+    container.innerHTML = `
     <div class="ticker-total-wrap">
       <span class="ticker-label">Total tokens · live</span>
       <span class="ticker-total" id="ticker-total"></span>
     </div>
     <div class="ticker-models">${rows}</div>`;
 
-  // Re-use the total odometer if we had one; otherwise create it (reels).
-  const total = prev?.total ?? createOdometer({ reels: true });
-  container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
+    // Re-use the total odometer if we had one; otherwise create it (reels).
+    total = prev?.total ?? total;
+    container.querySelector<HTMLElement>("#ticker-total")!.appendChild(total.el);
 
-  const byModel = new Map<string, OdometerHandle>();
-  for (const m of models) {
-    const slot = container.querySelector<HTMLElement>(
-      `.ticker-count[data-model="${cssEscape(m.model)}"]`,
-    );
-    if (!slot) continue;
-    const odo = prevByModel.get(m.model) ?? createOdometer();
-    slot.appendChild(odo.el);
-    byModel.set(m.model, odo);
-  }
+    for (const m of models) {
+      const slot = container.querySelector<HTMLElement>(
+        `.ticker-count[data-model="${cssEscape(m.model)}"]`,
+      );
+      if (!slot) continue;
+      const odo = prevByModel.get(m.model) ?? createOdometer();
+      slot.appendChild(odo.el);
+      byModel.set(m.model, odo);
+    }
+  });
 
   states.set(container, { total, byModel });
 

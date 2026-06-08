@@ -14,6 +14,7 @@ import {
 import { createSettingsPanel } from "./components/settings-panel";
 import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
 import { animateNumber } from "./lib/tween";
+import { animateHeightChange } from "./lib/motion";
 import { renderLimits, tickCountdowns } from "./components/limits";
 import { renderBySource } from "./components/by-source";
 import { renderTokenTicker, updateTokenTicker } from "./components/token-ticker";
@@ -476,29 +477,33 @@ function sessionRowMarkup(session: SessionState): string {
  */
 function renderSessions(sessions: SessionState[]): void {
   const strip = el("current-strip");
-  if (!sessions.length) {
-    lastSessionTokens.clear();
-    strip.innerHTML = `<span class="cs-empty">No active session</span>`;
-    return;
-  }
+  // Smoothly transition the strip's height when rows are added/removed (FLIP);
+  // a no-op when the height is unchanged (the common per-tick re-render).
+  animateHeightChange(strip, () => {
+    if (!sessions.length) {
+      lastSessionTokens.clear();
+      strip.innerHTML = `<span class="cs-empty">No active session</span>`;
+      return;
+    }
 
-  strip.innerHTML = sessions.map(sessionRowMarkup).join("");
+    strip.innerHTML = sessions.map(sessionRowMarkup).join("");
 
-  // Tween each card's token count from its remembered value (count up from 0
-  // on first appearance), and drop ids that are no longer active.
-  const live = new Set(sessions.map((s) => s.sessionId));
-  for (const id of [...lastSessionTokens.keys()]) {
-    if (!live.has(id)) lastSessionTokens.delete(id);
-  }
-  for (const s of sessions) {
-    const node = strip.querySelector<HTMLElement>(
-      `.cs-tokens[data-session="${cssAttrEscape(s.sessionId)}"]`,
-    );
-    if (!node) continue;
-    const from = lastSessionTokens.get(s.sessionId) ?? 0;
-    lastSessionTokens.set(s.sessionId, s.tokens);
-    animateNumber(node, from, s.tokens, { format: (v) => `${formatTokens(v)} tok` });
-  }
+    // Tween each card's token count from its remembered value (count up from 0
+    // on first appearance), and drop ids that are no longer active.
+    const live = new Set(sessions.map((s) => s.sessionId));
+    for (const id of [...lastSessionTokens.keys()]) {
+      if (!live.has(id)) lastSessionTokens.delete(id);
+    }
+    for (const s of sessions) {
+      const node = strip.querySelector<HTMLElement>(
+        `.cs-tokens[data-session="${cssAttrEscape(s.sessionId)}"]`,
+      );
+      if (!node) continue;
+      const from = lastSessionTokens.get(s.sessionId) ?? 0;
+      lastSessionTokens.set(s.sessionId, s.tokens);
+      animateNumber(node, from, s.tokens, { format: (v) => `${formatTokens(v)} tok` });
+    }
+  });
 }
 
 /** Escape a session id for use inside a CSS attribute selector. */
