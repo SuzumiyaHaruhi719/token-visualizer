@@ -14,6 +14,19 @@ beforeEach(() => {
   setOption.mockClear();
   document.body.innerHTML = `<main id="app"></main>`;
   (window as any).__CM_MOCK__ = true;
+  // Snap number tweens instantly so KPI text is final right after render.
+  (window as any).matchMedia = (q: string) => ({
+    matches: true,
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    onchange: null,
+    dispatchEvent() {
+      return false;
+    },
+  });
 });
 
 describe("dashboard integration (mock data)", () => {

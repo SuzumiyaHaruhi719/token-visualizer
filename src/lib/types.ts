@@ -32,12 +32,61 @@ export interface TimeseriesBucket {
   cacheRead: number;
 }
 
+export type Source = "claude" | "codex";
+
+export interface BySource {
+  source: Source;
+  tokens: number;
+  costUsd: number | null;
+}
+
 export interface Summary {
   range: string;
   totals: Totals;
   byModel: ByModel[];
   byProject: ByProject[];
+  bySource: BySource[];
   timeseries: TimeseriesBucket[];
+}
+
+// /api/limits ---------------------------------------------------------------
+
+/** A rate-limit window. `resetsAt` is epoch SECONDS. */
+export interface RateWindow {
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: number;
+}
+
+export interface ClaudeSessionLimit {
+  project: string;
+  model: string;
+  tokens: number;
+  state: PetState;
+}
+
+export interface ClaudeLimits {
+  session: ClaudeSessionLimit | null;
+  fiveHour: RateWindow | null;
+  weekly: RateWindow | null;
+  note: string;
+}
+
+export interface CodexSessionLimit {
+  model: string;
+  tokens: number;
+}
+
+export interface CodexLimits {
+  session: CodexSessionLimit | null;
+  fiveHour: RateWindow | null;
+  weekly: RateWindow | null;
+  planType: string | null;
+}
+
+export interface Limits {
+  claude: ClaudeLimits;
+  codex: CodexLimits;
 }
 
 export type PetStateKind =

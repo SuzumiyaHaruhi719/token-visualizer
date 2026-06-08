@@ -15,9 +15,14 @@ vi.mock("./lib/api", () => ({
     totals: null,
     byModel: null,
     byProject: null,
+    bySource: null,
     timeseries: null,
   })),
   getCurrent: vi.fn(async () => null),
+  getLimits: vi.fn(async () => ({
+    claude: { session: null, fiveHour: null, weekly: null, note: "remaining not exposed locally" },
+    codex: { session: null, fiveHour: null, weekly: null, planType: null },
+  })),
   subscribe: vi.fn(() => () => {}),
 }));
 
@@ -26,6 +31,19 @@ import { bootstrap, loadRange, renderCurrent } from "./main";
 beforeEach(() => {
   setOption.mockClear();
   document.body.innerHTML = `<main id="app"></main>`;
+  // Snap number tweens instantly so KPI text is final right after render.
+  (window as any).matchMedia = (q: string) => ({
+    matches: true,
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    onchange: null,
+    dispatchEvent() {
+      return false;
+    },
+  });
 });
 
 describe("dashboard resilience (null / partial data)", () => {

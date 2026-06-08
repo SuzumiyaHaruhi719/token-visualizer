@@ -13,6 +13,7 @@ import type {
   RangeKey,
   CmServerEvent,
   Totals,
+  Limits,
 } from "./types";
 
 declare global {
@@ -112,7 +113,34 @@ export function mockSummary(range: RangeKey = "today"): Summary {
       { project: "gstack", tokens: 7_600_000 },
       { project: "scratch", tokens: 3_500_000 },
     ],
+    bySource: [
+      { source: "claude", tokens: 108_400_000, costUsd: 39.9 },
+      { source: "codex", tokens: 10_100_000, costUsd: 1.17 },
+    ],
     timeseries,
+  };
+}
+
+export function mockLimits(): Limits {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    claude: {
+      session: {
+        project: "claude-monitor",
+        model: "claude-opus-4-8",
+        tokens: 1_240_000,
+        state: { kind: "working", tool: "Edit" },
+      },
+      fiveHour: null,
+      weekly: null,
+      note: "remaining not exposed locally",
+    },
+    codex: {
+      session: { model: "gpt-5.4-codex", tokens: 412_000 },
+      fiveHour: { usedPercent: 38, remainingPercent: 62, resetsAt: now + 2 * 3600 + 14 * 60 },
+      weekly: { usedPercent: 71, remainingPercent: 29, resetsAt: now + 3 * 86400 },
+      planType: "Plus",
+    },
   };
 }
 
@@ -186,6 +214,15 @@ export async function getSessions(): Promise<SessionState[]> {
     return await getJson<SessionState[]>(`/api/sessions`);
   } catch {
     return mockSessions();
+  }
+}
+
+export async function getLimits(): Promise<Limits> {
+  if (isMockForced()) return mockLimits();
+  try {
+    return await getJson<Limits>(`/api/limits`);
+  } catch {
+    return mockLimits();
   }
 }
 

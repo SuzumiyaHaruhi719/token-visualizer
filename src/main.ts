@@ -3,14 +3,19 @@
 
 import * as echarts from "echarts";
 import "./styles.css";
-import { getSummary, getCurrent, subscribe } from "./lib/api";
+import { getSummary, getCurrent, getLimits, subscribe } from "./lib/api";
 import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
+import { animateNumber } from "./lib/tween";
+import { renderLimits, tickCountdowns } from "./components/limits";
+import { renderBySource } from "./components/by-source";
 import type {
   Summary,
   SessionState,
   RangeKey,
   CmServerEvent,
   Totals,
+  BySource,
+  Limits,
 } from "./lib/types";
 
 const RANGES: { key: RangeKey; label: string }[] = [
@@ -69,6 +74,10 @@ function renderShell(root: HTMLElement): void {
       <div class="kpi"><div class="kpi-label">Sessions / Messages</div><div class="kpi-value" id="kpi-sessions">—</div><div class="kpi-sub" id="kpi-sessions-sub"></div></div>
     </section>
 
+    <section class="bysource" id="bysource">
+      <span class="bysource-empty">No source data</span>
+    </section>
+
     <section class="panel panel-wide">
       <h2 class="panel-title">Token usage over time</h2>
       <div class="chart" id="chart-timeseries"></div>
@@ -84,6 +93,13 @@ function renderShell(root: HTMLElement): void {
         <div class="chart chart-sm" id="chart-projects"></div>
       </section>
     </div>
+
+    <section class="panel">
+      <h2 class="panel-title">Session limits</h2>
+      <div id="limits-body">
+        <span class="cs-empty">Loading limits…</span>
+      </div>
+    </section>
 
     <section class="panel">
       <h2 class="panel-title">Cache efficiency</h2>
@@ -169,6 +185,11 @@ function normalizeSummary(input: Summary | null | undefined, fallbackRange: Rang
       project: typeof p?.project === "string" ? p.project : "unknown",
       tokens: finiteNumber(p?.tokens),
     })),
+    bySource: (Array.isArray(raw.bySource) ? raw.bySource : []).map((b) => ({
+      source: b?.source === "codex" ? "codex" : "claude",
+      tokens: finiteNumber(b?.tokens),
+      costUsd: finiteNullable(b?.costUsd),
+    })) as BySource[],
     timeseries: (Array.isArray(raw.timeseries) ? raw.timeseries : []).map((b) => ({
       bucket: typeof b?.bucket === "string" ? b.bucket : "",
       input: finiteNumber(b?.input),
@@ -284,20 +305,65 @@ function renderProjects(chart: echarts.ECharts, s: Summary): void {
   });
 }
 
+// Last numeric value rendered into each tweened element, so updates animate
+// from the previous value (not from 0). The very first tween counts up from 0.
+const lastValues = new Map<string, number>();
+
+/** Tween a KPI element from its remembered value to `to`, formatting each frame. */
+function tweenKpi(id: string, to: number, format: (v: number) => string): void {
+  const node = el(id);
+  const from = lastValues.get(id) ?? 0;
+  lastValues.set(id, to);
+  animateNumber(node, from, to, { format });
+}
+
 function renderKpis(s: Summary): void {
   const t = s.totals;
-  el("kpi-tokens").textContent = formatTokens(t.tokens);
+  tweenKpi("kpi-tokens", t.tokens, formatTokens);
   el("kpi-tokens-sub").textContent = `${formatTokens(t.input)} in · ${formatTokens(t.output)} out`;
-  el("kpi-cost").textContent = formatCost(t.costUsd);
-  el("kpi-cache").textContent = formatPct(t.cacheHitRate);
+  retweenCost(t.costUsd);
+  tweenKpi("kpi-cache", t.cacheHitRate, formatPct);
   el("kpi-cache-sub").textContent = `${formatTokens(t.cacheRead)} cached reads`;
-  el("kpi-sessions").textContent = `${formatInt(t.sessions)} / ${formatInt(t.messages)}`;
+  renderSessionsKpi(t.sessions, t.messages);
   el("kpi-sessions-sub").textContent = "sessions / messages";
+}
+
+/** Tween the cost value, formatting the live value as currency each frame. */
+function retweenCost(costUsd: number | null): void {
+  const node = el("kpi-cost");
+  if (costUsd === null) {
+    lastValues.delete("kpi-cost");
+    node.textContent = "—";
+    return;
+  }
+  const from = lastValues.get("kpi-cost") ?? 0;
+  lastValues.set("kpi-cost", costUsd);
+  animateNumber(node, from, costUsd, { format: (v) => formatCost(v) });
+}
+
+/** Tween the combined "sessions / messages" line; both numbers animate. */
+function renderSessionsKpi(sessions: number, messages: number): void {
+  const node = el("kpi-sessions");
+  const fromS = lastValues.get("kpi-sessions") ?? 0;
+  const fromM = lastValues.get("kpi-messages") ?? 0;
+  lastValues.set("kpi-sessions", sessions);
+  lastValues.set("kpi-messages", messages);
+  const span = messages - fromM;
+  // Drive the line off the sessions tween, deriving messages proportionally so
+  // both numbers settle together on a single rAF loop.
+  animateNumber(node, fromS, sessions, {
+    format: (v) => {
+      const denom = sessions - fromS;
+      const progress = denom !== 0 ? (v - fromS) / denom : 1;
+      const msgs = fromM + span * progress;
+      return `${formatInt(v)} / ${formatInt(msgs)}`;
+    },
+  });
 }
 
 function renderCachePanel(s: Summary): void {
   const t = s.totals;
-  el("cache-big").textContent = formatPct(t.cacheHitRate);
+  tweenKpi("cache-big", t.cacheHitRate, formatPct);
   el("cache-read").textContent = formatTokens(t.cacheRead);
   el("cache-write").textContent = formatTokens(t.cacheCreate);
   el("cache-fresh").textContent = formatTokens(t.input);
@@ -338,12 +404,10 @@ function setActiveTab(range: RangeKey): void {
   });
 }
 
-async function loadRange(range: RangeKey): Promise<void> {
-  currentRange = range;
-  setActiveTab(range);
-  const summary = normalizeSummary(await getSummary(range), range);
+function renderSummary(summary: Summary): void {
   renderKpis(summary);
   renderCachePanel(summary);
+  renderBySource(el("bysource"), summary.bySource as BySource[]);
   if (charts) {
     renderTimeseries(charts.timeseries, summary);
     renderDonut(charts.donut, summary);
@@ -351,9 +415,46 @@ async function loadRange(range: RangeKey): Promise<void> {
   }
 }
 
+async function loadRange(range: RangeKey): Promise<void> {
+  currentRange = range;
+  setActiveTab(range);
+  const summary = normalizeSummary(await getSummary(range), range);
+  renderSummary(summary);
+}
+
+/** Re-fetch the current range's summary and re-render KPIs + charts in place. */
+async function refreshSummary(): Promise<void> {
+  const summary = normalizeSummary(await getSummary(currentRange), currentRange);
+  renderSummary(summary);
+}
+
+let lastLimits: Limits | null = null;
+
+/** Fetch limits and render the panel; remembers the snapshot for countdown ticks. */
+async function refreshLimits(): Promise<void> {
+  const limits = await getLimits();
+  lastLimits = limits;
+  renderLimits(el("limits-body"), limits);
+}
+
+// Debounce live summary refreshes so a burst of SSE frames coalesces into one
+// fetch (~400ms), keeping the KPI tweens smooth instead of thrashing.
+const SUMMARY_DEBOUNCE_MS = 400;
+let summaryDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSummaryRefresh(): void {
+  if (summaryDebounce !== null) clearTimeout(summaryDebounce);
+  summaryDebounce = setTimeout(() => {
+    summaryDebounce = null;
+    void refreshSummary();
+    void refreshLimits();
+  }, SUMMARY_DEBOUNCE_MS);
+}
+
 function handleEvent(ev: CmServerEvent): void {
   if (ev.type === "usage") {
     renderCurrent(ev.data.current);
+    scheduleSummaryRefresh();
   } else if (ev.type === "import") {
     const bar = el("import-bar");
     const { done, total } = ev.data;
@@ -365,6 +466,7 @@ function handleEvent(ev: CmServerEvent): void {
     } else {
       bar.hidden = true;
     }
+    scheduleSummaryRefresh();
   }
 }
 
@@ -382,6 +484,14 @@ async function bootstrap(): Promise<void> {
   await loadRange(currentRange);
   const initial = await getCurrent();
   renderCurrent(initial);
+  await refreshLimits();
+
+  // Tick the reset countdowns once per second without re-rendering markup.
+  if (typeof setInterval === "function") {
+    setInterval(() => {
+      if (lastLimits) tickCountdowns(el("limits-body"));
+    }, 1_000);
+  }
 
   subscribe(handleEvent);
 }
