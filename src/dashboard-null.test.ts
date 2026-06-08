@@ -35,6 +35,23 @@ vi.mock("./lib/api", () => ({
     claude: { session: null, fiveHour: null, weekly: null, note: "remaining not exposed locally" },
     codex: { session: null, fiveHour: null, weekly: null, planType: null },
   })),
+  getSettings: vi.fn(async () => ({
+    petsEnabled: true,
+    monitorEnabled: true,
+    soundEnabled: true,
+    soundVolume: 0.8,
+    discordEnabled: false,
+    discordClientId: null,
+  })),
+  updateSettings: vi.fn(async (patch: Record<string, unknown>) => ({
+    petsEnabled: true,
+    monitorEnabled: true,
+    soundEnabled: true,
+    soundVolume: 0.8,
+    discordEnabled: false,
+    discordClientId: null,
+    ...patch,
+  })),
   subscribe: vi.fn(() => () => {}),
 }));
 

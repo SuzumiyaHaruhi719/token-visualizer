@@ -11,6 +11,14 @@ pub struct Settings {
     /// left-clicking the tray icon does nothing (and any open popover is hidden).
     #[serde(default = "default_true")]
     pub monitor_enabled: bool,
+    /// Whether the session-end chime plays. When off, the session-end toast +
+    /// taskbar flash still fire; only the sound is suppressed.
+    #[serde(default = "default_true")]
+    pub sound_enabled: bool,
+    /// Session-end chime volume in `0.0..=1.0`. `1.0` plays the bundled wav at
+    /// full level; lower values scale the PCM samples before playback.
+    #[serde(default = "default_volume")]
+    pub sound_volume: f64,
     /// Last on-screen position (physical px) the user dragged the popover to.
     /// `None` until first drag → popover anchors to the bottom-right corner.
     #[serde(default)]
@@ -31,11 +39,17 @@ pub struct Settings {
 fn default_true() -> bool {
     true
 }
+/// Default chime volume (80%): audible but not jarring.
+fn default_volume() -> f64 {
+    0.8
+}
 impl Default for Settings {
     fn default() -> Self {
         Self {
             pets_enabled: true,
             monitor_enabled: true,
+            sound_enabled: true,
+            sound_volume: default_volume(),
             popover_x: None,
             popover_y: None,
             discord_enabled: false,
@@ -89,8 +103,31 @@ mod tests {
         let back: Settings = serde_json::from_str("{}").unwrap();
         assert!(back.pets_enabled);
         assert!(back.monitor_enabled);
+        assert!(back.sound_enabled);
+        assert_eq!(back.sound_volume, 0.8);
         assert_eq!(back.popover_x, None);
         assert_eq!(back.popover_y, None);
+    }
+
+    #[test]
+    fn sound_settings_round_trip() {
+        let s = Settings {
+            sound_enabled: false,
+            sound_volume: 0.35,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            json.contains("\"soundEnabled\":false") || json.contains("\"soundEnabled\": false"),
+            "expected camelCase soundEnabled in {json}"
+        );
+        assert!(
+            json.contains("\"soundVolume\":0.35") || json.contains("\"soundVolume\": 0.35"),
+            "expected camelCase soundVolume in {json}"
+        );
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!back.sound_enabled);
+        assert_eq!(back.sound_volume, 0.35);
     }
 
     #[test]

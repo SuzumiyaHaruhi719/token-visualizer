@@ -14,6 +14,8 @@ import type {
   CmServerEvent,
   Totals,
   Limits,
+  AppSettings,
+  AppSettingsPatch,
 } from "./types";
 
 declare global {
@@ -178,6 +180,17 @@ export function mockCurrent(): SessionState {
   return mockSessions()[0];
 }
 
+export function mockSettings(): AppSettings {
+  return {
+    petsEnabled: true,
+    monitorEnabled: true,
+    soundEnabled: true,
+    soundVolume: 0.8,
+    discordEnabled: false,
+    discordClientId: null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP getters (fall back to mock on failure or in mock mode)
 // ---------------------------------------------------------------------------
@@ -223,6 +236,35 @@ export async function getLimits(): Promise<Limits> {
     return await getJson<Limits>(`/api/limits`);
   } catch {
     return mockLimits();
+  }
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  if (isMockForced()) return mockSettings();
+  try {
+    return await getJson<AppSettings>(`/api/settings`);
+  } catch {
+    return mockSettings();
+  }
+}
+
+/**
+ * Apply a partial settings patch via `PUT /api/settings`, returning the full
+ * updated settings. In mock mode (or on failure) the patch is merged into the
+ * mock baseline so the panel still reflects the change.
+ */
+export async function updateSettings(patch: AppSettingsPatch): Promise<AppSettings> {
+  if (isMockForced()) return { ...mockSettings(), ...patch };
+  try {
+    const res = await fetch(apiUrl(`/api/settings`), {
+      method: "PUT",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error(`/api/settings -> HTTP ${res.status}`);
+    return (await res.json()) as AppSettings;
+  } catch {
+    return { ...mockSettings(), ...patch };
   }
 }
 

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use cmcore::pricing::PriceTable;
 use cmcore::store::Store;
 use cmcore::watcher::{self, WatchEvent};
-use server::{AppState, SseEvent};
+use server::{AppState, RuntimeSettings, SseEvent};
 use tauri::Manager;
 
 /// Configure the embedded WebView2 + this process to bypass any system proxy for
@@ -71,10 +71,11 @@ pub fn run() {
             // --- shared state -------------------------------------------------
             let db_path: PathBuf = cmcore::paths::default_db_path()?;
             let prices = load_prices();
-            let state = AppState::new(db_path.clone(), prices);
 
-            // Persisted on/off toggles shared with the relevant subsystems
-            // (state-poll/tray for pets, tray for the monitor popover).
+            // Persisted on/off toggles + chime config shared with the relevant
+            // subsystems (state-poll/tray for pets, tray for the monitor popover,
+            // state-poll for the chime) AND the settings panel via `/api/settings`.
+            // Volume is stored as a PERCENT (0..=100) so it fits an AtomicU32.
             let saved_settings = settings::load();
             let pets_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 saved_settings.pets_enabled,
@@ -82,6 +83,21 @@ pub fn run() {
             let monitor_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 saved_settings.monitor_enabled,
             ));
+            let sound_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                saved_settings.sound_enabled,
+            ));
+            let sound_volume = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
+                (saved_settings.sound_volume.clamp(0.0, 1.0) * 100.0).round() as u32,
+            ));
+            let runtime = RuntimeSettings {
+                pets_enabled: pets_enabled.clone(),
+                monitor_enabled: monitor_enabled.clone(),
+                sound_enabled: sound_enabled.clone(),
+                sound_volume: sound_volume.clone(),
+            };
+
+            let state = AppState::new(db_path.clone(), prices, runtime);
+
             // Live active-session count: written by the state-poll loop, read by
             // the tray click to size the monitor popover to the session count.
             let session_count =
@@ -114,6 +130,8 @@ pub fn run() {
                 let app_for_poll = handle.clone();
                 let pets_enabled_for_poll = pets_enabled.clone();
                 let session_count_for_poll = session_count.clone();
+                let sound_enabled_for_poll = sound_enabled.clone();
+                let sound_volume_for_poll = sound_volume.clone();
                 std::thread::Builder::new()
                     .name("cm-state-poll".into())
                     .spawn(move || {
@@ -124,6 +142,8 @@ pub fn run() {
                                 port,
                                 pets_enabled_for_poll,
                                 session_count_for_poll,
+                                sound_enabled_for_poll,
+                                sound_volume_for_poll,
                             );
                         }))
                         .is_err()
@@ -145,7 +165,6 @@ pub fn run() {
             tray::build(
                 &handle,
                 port,
-                pets_enabled.clone(),
                 monitor_enabled.clone(),
                 session_count.clone(),
             )?;

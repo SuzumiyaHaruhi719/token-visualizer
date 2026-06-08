@@ -112,6 +112,22 @@ export interface SessionState {
 
 export type RangeKey = "today" | "7d" | "30d" | "all";
 
+// /api/settings -------------------------------------------------------------
+
+/** Runtime + persisted app settings (mirrors the server `/api/settings` shape). */
+export interface AppSettings {
+  petsEnabled: boolean;
+  monitorEnabled: boolean;
+  soundEnabled: boolean;
+  /** Chime volume as a 0..1 float. */
+  soundVolume: number;
+  discordEnabled: boolean;
+  discordClientId: string | null;
+}
+
+/** Partial settings update: any subset of {@link AppSettings} fields. */
+export type AppSettingsPatch = Partial<AppSettings>;
+
 // SSE event payloads
 export interface UsageEvent {
   current: SessionState | null;

@@ -11,6 +11,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use cmcore::model::{SessionState, Summary};
+use crate::settings;
 use cmcore::pricing::PriceTable;
 use cmcore::query;
 use cmcore::store::Store;
@@ -81,11 +83,40 @@ pub struct AppState {
     pub import: Arc<RwLock<(usize, usize)>>,
     /// Fan-out bus for SSE.
     pub tx: broadcast::Sender<SseEvent>,
+    /// Live runtime toggles shared with the tray + state-poll loop, exposed via
+    /// `/api/settings`. The settings panel reads/writes these.
+    pub runtime: RuntimeSettings,
+}
+
+/// The interactive runtime settings shared between the embedded server (the
+/// settings panel) and the desktop subsystems (tray + chime). Each field is an
+/// atomic so a `PUT /api/settings` takes effect on the next tick without any
+/// restart. Volume is stored as a PERCENT (`0..=100`).
+#[derive(Clone)]
+pub struct RuntimeSettings {
+    pub pets_enabled: Arc<AtomicBool>,
+    pub monitor_enabled: Arc<AtomicBool>,
+    pub sound_enabled: Arc<AtomicBool>,
+    pub sound_volume: Arc<AtomicU32>,
+}
+
+impl Default for RuntimeSettings {
+    /// All toggles on, volume 80% — matches `Settings::default()`. Used by tests
+    /// and any caller that does not seed from `settings.json`.
+    fn default() -> Self {
+        Self {
+            pets_enabled: Arc::new(AtomicBool::new(true)),
+            monitor_enabled: Arc::new(AtomicBool::new(true)),
+            sound_enabled: Arc::new(AtomicBool::new(true)),
+            sound_volume: Arc::new(AtomicU32::new(80)),
+        }
+    }
 }
 
 impl AppState {
-    /// Build a fresh state with an empty broadcast bus.
-    pub fn new(db_path: PathBuf, prices: PriceTable) -> Self {
+    /// Build a fresh state with an empty broadcast bus. `runtime` carries the
+    /// shared on/off + volume atomics (seeded from `settings.json` in `lib.rs`).
+    pub fn new(db_path: PathBuf, prices: PriceTable, runtime: RuntimeSettings) -> Self {
         let (tx, _rx) = broadcast::channel(SSE_CHANNEL_CAP);
         Self {
             db_path,
@@ -94,6 +125,7 @@ impl AppState {
             current: Arc::new(RwLock::new(None)),
             import: Arc::new(RwLock::new((0, 0))),
             tx,
+            runtime,
         }
     }
 
@@ -126,6 +158,7 @@ pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
         .route("/api/sessions", get(get_sessions))
         .route("/api/pricing", get(get_pricing).put(put_pricing))
         .route("/api/limits", get(get_limits))
+        .route("/api/settings", get(get_settings).put(put_settings))
         .route("/events", get(sse_handler))
         .fallback_service(static_files)
         // Permissive CORS so the Vite dev server origin (localhost:5847) can call
@@ -201,6 +234,97 @@ async fn put_pricing(
         }
     }
     Ok(Json(new_table))
+}
+
+// ---------------------------------------------------------------------------
+// /api/settings — runtime toggles + Discord config (drives the settings panel)
+// ---------------------------------------------------------------------------
+
+/// Full settings response. Live toggles come from the runtime atomics; the
+/// Discord fields are read from `settings.json` (they only take effect at
+/// startup, so there is no runtime atomic for them).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsResponse {
+    pets_enabled: bool,
+    monitor_enabled: bool,
+    sound_enabled: bool,
+    /// Volume as a `0.0..=1.0` float (stored internally as percent).
+    sound_volume: f64,
+    discord_enabled: bool,
+    discord_client_id: Option<String>,
+}
+
+/// Partial settings update. Every field is optional; only the provided ones are
+/// applied (to both the runtime atomics and `settings.json`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsPatch {
+    pets_enabled: Option<bool>,
+    monitor_enabled: Option<bool>,
+    sound_enabled: Option<bool>,
+    sound_volume: Option<f64>,
+    discord_enabled: Option<bool>,
+    discord_client_id: Option<String>,
+}
+
+/// Build the response from the live atomics + persisted Discord config.
+fn settings_snapshot(state: &AppState) -> SettingsResponse {
+    let rt = &state.runtime;
+    let persisted = settings::load();
+    SettingsResponse {
+        pets_enabled: rt.pets_enabled.load(Ordering::Relaxed),
+        monitor_enabled: rt.monitor_enabled.load(Ordering::Relaxed),
+        sound_enabled: rt.sound_enabled.load(Ordering::Relaxed),
+        sound_volume: rt.sound_volume.load(Ordering::Relaxed) as f64 / 100.0,
+        discord_enabled: persisted.discord_enabled,
+        discord_client_id: persisted.discord_client_id,
+    }
+}
+
+/// `GET /api/settings`: current toggles + Discord config.
+async fn get_settings(State(state): State<AppState>) -> Json<SettingsResponse> {
+    Json(settings_snapshot(&state))
+}
+
+/// `PUT /api/settings`: apply a PARTIAL patch to the runtime atomics AND persist
+/// the merged result to `settings.json`. Returns the full updated settings.
+async fn put_settings(
+    State(state): State<AppState>,
+    Json(patch): Json<SettingsPatch>,
+) -> Json<SettingsResponse> {
+    let rt = &state.runtime;
+    // Start from the persisted snapshot so untouched fields are preserved.
+    let mut merged = settings::load();
+
+    if let Some(v) = patch.pets_enabled {
+        rt.pets_enabled.store(v, Ordering::Relaxed);
+        merged.pets_enabled = v;
+    }
+    if let Some(v) = patch.monitor_enabled {
+        rt.monitor_enabled.store(v, Ordering::Relaxed);
+        merged.monitor_enabled = v;
+    }
+    if let Some(v) = patch.sound_enabled {
+        rt.sound_enabled.store(v, Ordering::Relaxed);
+        merged.sound_enabled = v;
+    }
+    if let Some(v) = patch.sound_volume {
+        let clamped = v.clamp(0.0, 1.0);
+        rt.sound_volume
+            .store((clamped * 100.0).round() as u32, Ordering::Relaxed);
+        merged.sound_volume = clamped;
+    }
+    if let Some(v) = patch.discord_enabled {
+        merged.discord_enabled = v;
+    }
+    if let Some(v) = patch.discord_client_id {
+        // Empty string clears the id (keeps the integration off).
+        merged.discord_client_id = if v.trim().is_empty() { None } else { Some(v) };
+    }
+
+    settings::save(&merged);
+    Json(settings_snapshot(&state))
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +616,7 @@ mod tests {
             let store = Store::open(&db_path).unwrap();
             store.insert_event(&sample_event("req-1")).unwrap();
         }
-        let state = AppState::new(db_path.clone(), PriceTable::seeded());
+        let state = AppState::new(db_path.clone(), PriceTable::seeded(), RuntimeSettings::default());
         let app = build_router(state, dir.clone());
 
         // Act: GET /api/summary?range=all
@@ -526,7 +650,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("t2.sqlite");
         let _ = Store::open(&db_path).unwrap();
-        let state = AppState::new(db_path, PriceTable::seeded());
+        let state = AppState::new(db_path, PriceTable::seeded(), RuntimeSettings::default());
         let app = build_router(state, dir.clone());
 
         let res = app
@@ -558,7 +682,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("lim.sqlite");
         let _ = Store::open(&db_path).unwrap();
-        let state = AppState::new(db_path, PriceTable::seeded());
+        let state = AppState::new(db_path, PriceTable::seeded(), RuntimeSettings::default());
         let app = build_router(state, dir.clone());
 
         let res = app
@@ -592,6 +716,51 @@ mod tests {
         assert!(v["codex"].get("fiveHour").is_some());
         assert!(v["codex"].get("weekly").is_some());
         assert!(v["codex"].get("planType").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GET /api/settings` returns 200 + the documented camelCase shape, with
+    /// the live toggle values read straight from the runtime atomics.
+    #[tokio::test]
+    async fn settings_endpoint_reflects_runtime_atomics() {
+        let dir = std::env::temp_dir().join(format!("cm-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set.sqlite");
+        let _ = Store::open(&db_path).unwrap();
+
+        // Seed non-default runtime values to prove the handler reads them.
+        let runtime = RuntimeSettings {
+            pets_enabled: Arc::new(AtomicBool::new(false)),
+            monitor_enabled: Arc::new(AtomicBool::new(true)),
+            sound_enabled: Arc::new(AtomicBool::new(false)),
+            sound_volume: Arc::new(AtomicU32::new(40)),
+        };
+        let state = AppState::new(db_path, PriceTable::seeded(), runtime);
+        let app = build_router(state, dir.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["petsEnabled"].as_bool(), Some(false));
+        assert_eq!(v["monitorEnabled"].as_bool(), Some(true));
+        assert_eq!(v["soundEnabled"].as_bool(), Some(false));
+        assert_eq!(v["soundVolume"].as_f64(), Some(0.40));
+        // Discord fields are always present (read from settings.json).
+        assert!(v.get("discordEnabled").is_some());
+        assert!(v.get("discordClientId").is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3,7 +3,15 @@
 
 import * as echarts from "echarts";
 import "./styles.css";
-import { getSummary, getSessions, getLimits, subscribe } from "./lib/api";
+import {
+  getSummary,
+  getSessions,
+  getLimits,
+  subscribe,
+  getSettings,
+  updateSettings,
+} from "./lib/api";
+import { createSettingsPanel } from "./components/settings-panel";
 import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
 import { animateNumber } from "./lib/tween";
 import { renderLimits, tickCountdowns } from "./components/limits";
@@ -60,8 +68,13 @@ function renderShell(root: HTMLElement): void {
             `<button class="range-tab${i === 0 ? " active" : ""}" data-range="${r.key}">${r.label}</button>`,
         ).join("")}
       </nav>
-      <div class="live" id="live"><span class="dot"></span> live</div>
+      <div class="topbar-right">
+        <div class="live" id="live"><span class="dot"></span> live</div>
+        <button class="settings-gear" id="settings-gear" aria-label="Settings" title="Settings">⚙</button>
+      </div>
     </header>
+
+    <div id="settings-mount"></div>
 
     <div class="import-bar" id="import-bar" hidden>
       <div class="import-fill" id="import-fill"></div>
@@ -636,6 +649,14 @@ async function bootstrap(): Promise<void> {
     if (!target?.dataset.range) return;
     void loadRange(target.dataset.range as RangeKey);
   });
+
+  // Settings gear -> the consolidated settings panel (pets / monitor / sound /
+  // volume / Discord). Mounted lazily into its own host so it overlays cleanly.
+  const settingsPanel = createSettingsPanel(el("settings-mount"), {
+    getSettings,
+    updateSettings,
+  });
+  el("settings-gear").addEventListener("click", () => void settingsPanel.open());
 
   await loadRange(currentRange);
   renderSessions(await getSessions());

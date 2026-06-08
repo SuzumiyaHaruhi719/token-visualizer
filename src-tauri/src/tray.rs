@@ -1,26 +1,23 @@
 //! System tray icon + menu.
 //!
 //! Menu: "Open Dashboard" (shows/focuses the dashboard window) and "Quit"
-//! (exits the app). The tooltip reflects the most-recently-active session and
-//! is refreshed best-effort from the state-poll loop via [`update_tooltip`].
+//! (exits the app). The pets + monitor toggles now live in the dashboard's
+//! settings panel, not here. The tooltip reflects the most-recently-active
+//! session and is refreshed best-effort from the state-poll loop via
+//! [`update_tooltip`].
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cmcore::model::SessionState;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::AppHandle;
 
-use crate::settings::{self, Settings};
 use crate::windows;
 
 /// Menu item id: show the dashboard.
 const ID_OPEN: &str = "open_dashboard";
-/// Menu item id: toggle desktop pets on/off.
-const ID_PETS: &str = "toggle_pets";
-/// Menu item id: toggle the tray current-session monitor popover on/off.
-const ID_MONITOR: &str = "toggle_monitor";
 /// Menu item id: quit the app.
 const ID_QUIT: &str = "quit";
 
@@ -28,74 +25,25 @@ const ID_QUIT: &str = "quit";
 pub const TRAY_ID: &str = "cm-tray";
 
 /// Build the tray icon with its menu. `port` is captured so "Open Dashboard"
-/// can (re)create the dashboard window against the running server. `pets_enabled`
-/// is the shared toggle the "Show Desktop Pets" check item drives.
+/// can (re)create the dashboard window against the running server.
+/// `monitor_enabled` gates the left-click popover (toggled from the settings
+/// panel); `session_count` sizes the popover to the live session count.
 pub fn build(
     app: &AppHandle,
     port: u16,
-    pets_enabled: Arc<AtomicBool>,
     monitor_enabled: Arc<AtomicBool>,
     session_count: Arc<AtomicUsize>,
 ) -> tauri::Result<TrayIcon> {
     let open_item = MenuItem::with_id(app, ID_OPEN, "Open Dashboard", true, None::<&str>)?;
-    let pets_item = CheckMenuItem::with_id(
-        app,
-        ID_PETS,
-        "Show Desktop Pets",
-        true,
-        pets_enabled.load(Ordering::Relaxed),
-        None::<&str>,
-    )?;
-    let monitor_item = CheckMenuItem::with_id(
-        app,
-        ID_MONITOR,
-        "Show Tray Monitor",
-        true,
-        monitor_enabled.load(Ordering::Relaxed),
-        None::<&str>,
-    )?;
     let quit_item = MenuItem::with_id(app, ID_QUIT, "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_item, &pets_item, &monitor_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-    let pets_item_cb = pets_item.clone();
-    let monitor_item_cb = monitor_item.clone();
-    let monitor_for_menu = monitor_enabled.clone();
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("Claude Monitor")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             ID_OPEN => windows::show_dashboard(app, port),
-            ID_PETS => {
-                let new = !pets_enabled.load(Ordering::Relaxed);
-                pets_enabled.store(new, Ordering::Relaxed);
-                // Preserve any other persisted settings (e.g. Discord config)
-                // by mutating only the pets toggle on the loaded snapshot.
-                let updated = Settings {
-                    pets_enabled: new,
-                    ..settings::load()
-                };
-                settings::save(&updated);
-                let _ = pets_item_cb.set_checked(new);
-                if !new {
-                    windows::close_all_pets(app);
-                }
-                // when re-enabled, the state-poll loop respawns pets within ~1s
-            }
-            ID_MONITOR => {
-                let new = !monitor_for_menu.load(Ordering::Relaxed);
-                monitor_for_menu.store(new, Ordering::Relaxed);
-                let updated = Settings {
-                    monitor_enabled: new,
-                    ..settings::load()
-                };
-                settings::save(&updated);
-                let _ = monitor_item_cb.set_checked(new);
-                if !new {
-                    // Hide an open popover immediately when disabled.
-                    windows::hide_popover(app);
-                }
-            }
             ID_QUIT => app.exit(0),
             _ => {}
         })

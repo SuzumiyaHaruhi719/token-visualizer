@@ -218,8 +218,12 @@ fn fit_popover(app: &AppHandle, win: &WebviewWindow, session_count: usize) {
     position_popover(app, win, height);
 }
 
-/// Hide the popover if it is currently visible (used when the monitor toggle is
-/// switched off). Saves the position first so re-enabling restores it.
+/// Hide the popover if it is currently visible. Saves the position first so
+/// re-enabling restores it. Retained for the toggle-off path: the monitor toggle
+/// now lives in the settings panel (it flips the shared atomic, which the tray
+/// left-click already respects), so an open popover simply won't reopen — this
+/// helper stays available for an immediate-hide wiring if desired later.
+#[allow(dead_code)]
 pub fn hide_popover(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {

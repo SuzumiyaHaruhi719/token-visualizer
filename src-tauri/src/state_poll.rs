@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +48,8 @@ pub fn run(
     port: u16,
     pets_enabled: Arc<AtomicBool>,
     session_count: Arc<AtomicUsize>,
+    sound_enabled: Arc<AtomicBool>,
+    sound_volume: Arc<AtomicU32>,
 ) {
     // Cache of session_id -> jsonl path so we don't re-walk the whole tree
     // every second. Paths are stable once discovered.
@@ -70,7 +72,11 @@ pub fn run(
                     // never missed by the change short-circuit below.
                     let ended = end_tracker.observe(&sessions);
                     if !ended.is_empty() {
-                        notify_ended(&app, ended);
+                        // Read the live sound toggle + volume (percent 0..=100)
+                        // each time so settings changes take effect immediately.
+                        let enabled = sound_enabled.load(Ordering::Relaxed);
+                        let volume = sound_volume.load(Ordering::Relaxed) as f32 / 100.0;
+                        notify_ended(&app, ended, enabled, volume);
                     }
 
                     // Publish the live count every tick so the tray click can
@@ -98,12 +104,13 @@ pub fn run(
 }
 
 /// Fire taskbar-flash + toast + chime for each ended session on the main thread
-/// (Windows window ops must not run off the UI thread).
-fn notify_ended(app: &AppHandle, ended: Vec<notify::EndedSession>) {
+/// (Windows window ops must not run off the UI thread). The chime is gated on
+/// `sound_enabled` and played at `volume` (`0.0..=1.0`).
+fn notify_ended(app: &AppHandle, ended: Vec<notify::EndedSession>, sound_enabled: bool, volume: f32) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         for session in &ended {
-            notify::notify_session_ended(&app, session);
+            notify::notify_session_ended(&app, session, sound_enabled, volume);
         }
     });
 }
