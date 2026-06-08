@@ -365,16 +365,8 @@ body {
   line-height: 1;
   letter-spacing: -2px;
   font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 32px rgba(255, 138, 92, 0.35);
-}
-/* Coral->gold gradient applied to the odometer glyphs (background-clip:text
-   only clips an element's OWN text, so it must live on the glyph spans). */
-.ticker-total .odo-glyph,
-.ticker-total .odo-sep {
-  background: linear-gradient(90deg, #ffa074, var(--accent-deep) 45%, var(--gold));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: #ff8e63; /* solid coral */
+  text-shadow: 0 0 26px rgba(255, 138, 92, 0.45); /* glow — safe now (no clipped cells) */
 }
 .ticker-models {
   display: flex;
@@ -405,43 +397,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Rolling-digit odometer ------------------------------------------------- */
-/* A row of fixed-width digit cells (each clipping a vertical 0-9 strip) plus
-   static comma cells. Fixed-width cells + tabular-nums => zero horizontal
-   jitter while the digits roll. */
+/* Rolling number ---------------------------------------------------------- */
+/* One cohesive counting number. tabular-nums keeps the width steady so it does
+   not jitter horizontally as the digits roll. */
 .odometer {
-  display: inline-flex;
-  align-items: stretch;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.odo-digit {
-  display: inline-block;
-  overflow: hidden;
-  /* One glyph tall; width is ONE full tabular digit advance. Under tabular-nums
-     every digit advances by exactly 1ch, so the cell must be 1ch — a narrower
-     cell (e.g. 0.62ch) clips each glyph and the digits overlap/squish together. */
-  height: 1em;
-  width: 1ch;
-  vertical-align: top;
-}
-.odo-strip {
-  display: flex;
-  flex-direction: column;
-  /* NOTE: no `will-change: transform` here. Promoting each strip to its own
-     compositing layer made the glass panel's backdrop-filter stop applying
-     behind the digits, painting an ugly hard-edged dark box that didn't blend
-     with the panel. The translateY rolls repaint fine without it. */
-}
-.odo-glyph {
-  display: block;
-  height: 1em;
-  line-height: 1;
-  text-align: center;
-}
-.odo-sep {
-  display: inline-block;
-  vertical-align: top;
+  white-space: nowrap;
 }
 
 /* Session limits panel -------------------------------------------------- */
