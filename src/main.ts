@@ -203,8 +203,31 @@ function normalizeSummary(input: Summary | null | undefined, fallbackRange: Rang
   };
 }
 
+/** A vertical gradient from the series color (top, ~0.55 alpha) to transparent. */
+function areaGradient(color: string): echarts.graphic.LinearGradient {
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    { offset: 0, color: withAlpha(color, 0.55) },
+    { offset: 1, color: withAlpha(color, 0.02) },
+  ]);
+}
+
+/** Apply an alpha (0..1) to a #rrggbb hex color, returning an rgba() string. */
+function withAlpha(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const int = parseInt(m[1], 16);
+  const r = (int >> 16) & 0xff;
+  const g = (int >> 8) & 0xff;
+  const b = int & 0xff;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
   const x = s.timeseries.map((b) => bucketLabel(b.bucket, s.range as RangeKey));
+  // Single-bucket case: a smooth area with one point renders nothing. Keep
+  // boundaryGap false so the area spans the plot edge-to-edge and a lone point
+  // still anchors a visible filled column.
+  const singlePoint = x.length <= 1;
   const series = (
     [
       ["Fresh input", "input", COLORS.input],
@@ -214,39 +237,48 @@ function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
     ] as const
   ).map(([name, key, color]) => ({
     name,
-    type: "bar" as const,
+    type: "line" as const,
     stack: "tok",
-    emphasis: { focus: "series" as const },
+    smooth: true,
+    showSymbol: singlePoint, // show the marker when there's only one bucket
+    symbolSize: 6,
+    lineStyle: { width: 1.5, color },
     itemStyle: { color },
+    areaStyle: { color: areaGradient(color), opacity: 1 },
+    emphasis: { focus: "series" as const },
     data: s.timeseries.map((b) => b[key]),
   }));
 
-  chart.setOption({
-    backgroundColor: "transparent",
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      valueFormatter: (v: number) => formatTokens(v),
+  chart.setOption(
+    {
+      backgroundColor: "transparent",
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "line", lineStyle: { color: COLORS.axis } },
+        valueFormatter: (v: number) => formatTokens(v),
+      },
+      legend: {
+        data: series.map((x) => x.name),
+        textStyle: { color: COLORS.label },
+        top: 0,
+      },
+      grid: { left: 56, right: 16, top: 36, bottom: 28 },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: x,
+        axisLine: { lineStyle: { color: COLORS.axis } },
+        axisLabel: { color: COLORS.label },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: COLORS.label, formatter: (v: number) => formatTokens(v) },
+        splitLine: { lineStyle: { color: COLORS.axis } },
+      },
+      series,
     },
-    legend: {
-      data: series.map((x) => x.name),
-      textStyle: { color: COLORS.label },
-      top: 0,
-    },
-    grid: { left: 56, right: 16, top: 36, bottom: 28 },
-    xAxis: {
-      type: "category",
-      data: x,
-      axisLine: { lineStyle: { color: COLORS.axis } },
-      axisLabel: { color: COLORS.label },
-    },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: COLORS.label, formatter: (v: number) => formatTokens(v) },
-      splitLine: { lineStyle: { color: COLORS.axis } },
-    },
-    series,
-  });
+    { notMerge: true },
+  );
 }
 
 function renderDonut(chart: echarts.ECharts, s: Summary): void {
@@ -458,11 +490,11 @@ function setActiveTab(range: RangeKey): void {
  * token-ticker odometers). Cheap enough to run on the 2Hz heartbeat — does NOT
  * touch the ECharts charts.
  */
-function updateNumbers(summary: Summary): void {
+function updateNumbers(summary: Summary, tickerMode: "roll" | "snap" = "roll"): void {
   renderKpis(summary);
   renderCachePanel(summary);
   renderBySource(el("bysource"), summary.bySource as BySource[]);
-  updateTokenTicker(el("token-ticker"), summary);
+  updateTokenTicker(el("token-ticker"), summary, tickerMode);
 }
 
 /** Re-render the ECharts charts. Kept off the 2Hz loop (would thrash). */
@@ -473,8 +505,8 @@ function updateCharts(summary: Summary): void {
   renderProjects(charts.projects, summary);
 }
 
-function renderSummary(summary: Summary): void {
-  updateNumbers(summary);
+function renderSummary(summary: Summary, tickerMode: "roll" | "snap" = "roll"): void {
+  updateNumbers(summary, tickerMode);
   updateCharts(summary);
 }
 
@@ -482,13 +514,15 @@ async function loadRange(range: RangeKey): Promise<void> {
   currentRange = range;
   setActiveTab(range);
   const summary = normalizeSummary(await getSummary(range), range);
-  renderSummary(summary);
+  // Range switch: SNAP the odometers so we don't roll for seconds across
+  // wildly different totals (e.g. today -> all).
+  renderSummary(summary, "snap");
 }
 
 /** Re-fetch the current range's summary and re-render KPIs + charts in place. */
 async function refreshSummary(): Promise<void> {
   const summary = normalizeSummary(await getSummary(currentRange), currentRange);
-  renderSummary(summary);
+  renderSummary(summary, "roll");
 }
 
 // --- 2Hz numeric heartbeat -------------------------------------------------
@@ -519,7 +553,9 @@ async function heartbeatTick(): Promise<void> {
       getSummary(currentRange),
       getSessions(),
     ]);
-    updateNumbers(normalizeSummary(summary, currentRange));
+    // "roll": feed setTarget so the odometers perpetually ease UP toward the
+    // freshest total (latency does not matter — the readout keeps climbing).
+    updateNumbers(normalizeSummary(summary, currentRange), "roll");
     renderSessions(sessions);
   } finally {
     heartbeatInFlight = false;

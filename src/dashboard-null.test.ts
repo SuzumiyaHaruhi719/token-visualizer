@@ -4,6 +4,17 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const setOption = vi.fn();
 vi.mock("echarts", () => ({
   init: () => ({ setOption, resize: () => {}, dispose: () => {} }),
+  graphic: {
+    LinearGradient: class {
+      constructor(
+        public x: number,
+        public y: number,
+        public x2: number,
+        public y2: number,
+        public colorStops: { offset: number; color: string }[],
+      ) {}
+    },
+  },
 }));
 
 // Feed deliberately null / partial API payloads to exercise main.ts's

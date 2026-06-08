@@ -13,6 +13,21 @@
 import type { Summary, ByModel } from "../lib/types";
 import { createOdometer, type OdometerHandle } from "./odometer";
 
+// How a number update is applied to its odometer:
+//  - "roll": slowly ease UP toward the value (live increments within a range).
+//  - "snap": jump immediately (first paint / range switch — never roll for
+//    seconds across billions when switching today/7d/30d/all).
+export type TickerUpdateMode = "roll" | "snap";
+
+/** Apply a value to an odometer with the requested mode. */
+function applyValue(odo: OdometerHandle, n: number, mode: TickerUpdateMode): void {
+  if (mode === "roll") {
+    odo.setTarget(n);
+  } else {
+    odo.snapTo(n);
+  }
+}
+
 // Cached odometer handles for the currently mounted panel. The total uses
 // `total`; per-model handles are keyed by model name. Reset on full rebuild.
 interface TickerState {
@@ -94,8 +109,8 @@ export function renderTokenTicker(container: HTMLElement, summary: Summary | nul
 
   states.set(container, { total, byModel });
 
-  // Roll up from 0 to the initial values so the first paint animates in.
-  updateTokenTicker(container, summary);
+  // First paint: snap to the initial values (no multi-second roll on mount).
+  updateTokenTicker(container, summary, "snap");
 }
 
 /**
@@ -104,12 +119,17 @@ export function renderTokenTicker(container: HTMLElement, summary: Summary | nul
  * the odometer handles of models that persist, so they roll rather than snap);
  * otherwise the numbers roll in place.
  */
-export function updateTokenTicker(container: HTMLElement, summary: Summary | null): void {
+export function updateTokenTicker(
+  container: HTMLElement,
+  summary: Summary | null,
+  mode: TickerUpdateMode = "roll",
+): void {
   const models = safeModels(summary);
   const state = states.get(container);
 
   // If there's no cached state, or the set of model rows no longer matches the
-  // DOM, rebuild markup (preserving persisting model odometers) first.
+  // DOM, rebuild markup (preserving persisting model odometers) first. A model
+  // set change is a structural shift, so snap the values into place.
   const domRows = container.querySelectorAll<HTMLElement>(".ticker-row");
   const domModels = Array.from(domRows, (r) => r.dataset.model ?? "");
   const sameRows =
@@ -122,9 +142,10 @@ export function updateTokenTicker(container: HTMLElement, summary: Summary | nul
     return;
   }
 
-  state.total.setValue(safeTotal(summary));
+  applyValue(state.total, safeTotal(summary), mode);
   for (const m of models) {
-    state.byModel.get(m.model)?.setValue(m.tokens);
+    const odo = state.byModel.get(m.model);
+    if (odo) applyValue(odo, m.tokens, mode);
   }
 }
 
@@ -177,9 +198,10 @@ function rebuildPreserving(
 
   states.set(container, { total, byModel });
 
-  total.setValue(safeTotal(summary));
+  // Structural rebuild: snap values into place rather than rolling.
+  total.snapTo(safeTotal(summary));
   for (const m of models) {
-    byModel.get(m.model)?.setValue(m.tokens);
+    byModel.get(m.model)?.snapTo(m.tokens);
   }
 }
 
