@@ -48,15 +48,17 @@ describe("dashboard integration (mock data)", () => {
     expect(document.getElementById("kpi-cache")?.textContent).toMatch(/%$/);
   });
 
-  it("configures all three charts on range load", async () => {
+  it("configures all three charts on range load without chart animations", async () => {
     await bootstrap();
     setOption.mockClear();
     await loadRange("7d");
-    // The chart redraw is deferred/debounced (so it doesn't hitch the number
-    // roll), so wait for that timer before asserting.
-    await new Promise((r) => setTimeout(r, 220));
-    // timeseries + donut + projects each call setOption at least once
+    // timeseries + donut + projects each call setOption at least once, and
+    // tab-switch redraws must not start ECharts rAF animation loops that
+    // compete with the token odometer transition.
     expect(setOption.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const [option] of setOption.mock.calls) {
+      expect(option).toMatchObject({ animation: false });
+    }
   });
 
   it("marks the active range tab", async () => {

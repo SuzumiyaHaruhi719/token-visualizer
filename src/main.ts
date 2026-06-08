@@ -45,11 +45,18 @@ const COLORS = {
 };
 
 const CHART_MOTION = {
+  animation: true,
   animationDuration: 700,
   animationDurationUpdate: 520,
   animationEasing: "cubicInOut",
   animationEasingUpdate: "cubicInOut",
 } as const;
+
+const CHART_STILL = {
+  animation: false,
+} as const;
+
+type ChartMotion = typeof CHART_MOTION | typeof CHART_STILL;
 
 type DonutTooltipParam = {
   name: string;
@@ -260,7 +267,11 @@ function legendSelection(chart: echarts.ECharts): Record<string, boolean> | unde
   return opt?.legend?.[0]?.selected;
 }
 
-function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
+function renderTimeseries(
+  chart: echarts.ECharts,
+  s: Summary,
+  chartMotion: ChartMotion = CHART_MOTION,
+): void {
   // "today" uses an hourly intraday curve drawn as a smooth gradient AREA chart;
   // every other range uses daily buckets drawn as stacked BARS.
   const isDay = (s.range as RangeKey) === "today";
@@ -306,7 +317,7 @@ function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
 
   chart.setOption(
     {
-      ...CHART_MOTION,
+      ...chartMotion,
       backgroundColor: "transparent",
       tooltip: {
         trigger: "axis",
@@ -341,10 +352,14 @@ function renderTimeseries(chart: echarts.ECharts, s: Summary): void {
   );
 }
 
-function renderDonut(chart: echarts.ECharts, s: Summary): void {
+function renderDonut(
+  chart: echarts.ECharts,
+  s: Summary,
+  chartMotion: ChartMotion = CHART_MOTION,
+): void {
   const palette = ["#da7757", "#7c93c3", "#5bc0a8", "#e0a96d", "#b07cc3"];
   chart.setOption({
-    ...CHART_MOTION,
+    ...chartMotion,
     backgroundColor: "transparent",
     tooltip: {
       trigger: "item",
@@ -372,10 +387,14 @@ function renderDonut(chart: echarts.ECharts, s: Summary): void {
   });
 }
 
-function renderProjects(chart: echarts.ECharts, s: Summary): void {
+function renderProjects(
+  chart: echarts.ECharts,
+  s: Summary,
+  chartMotion: ChartMotion = CHART_MOTION,
+): void {
   const sorted = [...s.byProject].sort((a, b) => a.tokens - b.tokens).slice(-8);
   chart.setOption({
-    ...CHART_MOTION,
+    ...chartMotion,
     backgroundColor: "transparent",
     tooltip: {
       trigger: "axis",
@@ -596,20 +615,21 @@ function updateNumbers(
 }
 
 /** Re-render the ECharts charts. Kept off the 2Hz loop (would thrash). */
-function updateCharts(summary: Summary): void {
+function updateCharts(summary: Summary, chartMotion: ChartMotion = CHART_MOTION): void {
   if (!charts) return;
-  renderTimeseries(charts.timeseries, summary);
-  renderDonut(charts.donut, summary);
-  renderProjects(charts.projects, summary);
+  renderTimeseries(charts.timeseries, summary, chartMotion);
+  renderDonut(charts.donut, summary, chartMotion);
+  renderProjects(charts.projects, summary, chartMotion);
 }
 
 function renderSummary(
   summary: Summary,
   tickerMode: TickerMode = "roll",
   totalOverride?: number,
+  chartMotion: ChartMotion = CHART_MOTION,
 ): void {
   updateNumbers(summary, tickerMode, totalOverride);
-  updateCharts(summary);
+  updateCharts(summary, chartMotion);
 }
 
 async function loadRange(range: RangeKey): Promise<void> {
@@ -628,7 +648,7 @@ async function loadRange(range: RangeKey): Promise<void> {
   // the new range's total. The heartbeat keeps running — its raise-only creep
   // can't disturb a downward spin and just resumes the roll once the transition
   // lands, so there is no pause.
-  renderSummary(summary, "transition");
+  renderSummary(summary, "transition", undefined, CHART_STILL);
 }
 
 /** Re-fetch the current range's summary and re-render KPIs + charts in place. */
