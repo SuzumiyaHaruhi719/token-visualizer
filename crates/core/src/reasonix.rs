@@ -128,8 +128,8 @@ pub enum ReasonixActivity {
     ToolCall { call_id: String, name: String },
     /// A tool finished (`tool.result`) for the given call id (ok or error).
     ToolResult { call_id: String },
-    /// The model emitted its final reply for the turn (`model.final`) —
-    /// Responding.
+    /// The model's final reply for the turn (`model.final`) — the turn is
+    /// COMPLETE, so the session is Waiting (awaiting the user), not Responding.
     Final,
     /// A real USER turn boundary — there is no explicit user event, so this is
     /// never produced from `events.jsonl`; kept for symmetry / future use.
@@ -217,7 +217,7 @@ fn is_thinking_status(text: &str) -> bool {
 /// * the LAST tool call with no later `tool.result` for the same `call_id` means
 ///   a tool is still running -> [`PetState::Working`] (tool name),
 /// * otherwise the last meaningful activity decides:
-///   * `model.final` -> [`PetState::Responding`],
+///   * `model.final` (turn complete) -> [`PetState::Waiting`] (awaiting the user),
 ///   * a `tool.result` (the tool finished; the model is now reasoning about it,
 ///     with no final marker yet) -> [`PetState::Thinking`],
 ///   * `model.turn.started` / a thinking `status` -> [`PetState::Thinking`],
@@ -234,7 +234,10 @@ pub fn derive_reasonix_state(activities: &[ReasonixActivity]) -> crate::model::P
 
     for activity in activities.iter().rev() {
         match activity {
-            ReasonixActivity::Final => return PetState::Responding,
+            // `model.final` is the COMPLETED final reply — the turn is done, so
+            // the session is awaiting the user's next message (mirrors Claude's
+            // end_turn -> Waiting), NOT still actively responding minutes later.
+            ReasonixActivity::Final => return PetState::Waiting,
             // The tool finished (ok or error) and no final yet -> the model is
             // reasoning about the result.
             ReasonixActivity::ToolResult { .. } => return PetState::Thinking,
@@ -548,9 +551,11 @@ mod tests {
     }
 
     #[test]
-    fn trailing_final_is_responding() {
+    fn trailing_final_is_waiting() {
+        // A completed final reply = the turn is done -> Waiting (awaiting the
+        // user), not Responding (which lingered as "active" long after it ended).
         let acts = vec![call("c1", "run_command"), result("c1"), ReasonixActivity::Final];
-        assert_eq!(derive_reasonix_state(&acts), PetState::Responding);
+        assert_eq!(derive_reasonix_state(&acts), PetState::Waiting);
     }
 
     #[test]

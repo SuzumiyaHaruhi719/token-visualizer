@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_final_is_responding() {
+    fn trailing_final_is_waiting() {
         let dir = tmp();
         let events = concat!(
             r#"{"ts":"2026-06-09T01:52:20.000Z","type":"tool.result","callId":"c1","ok":true}"#, "\n",
@@ -340,7 +340,8 @@ mod tests {
         let now = file_mtime_ms(&ev_path).unwrap();
         let sessions = poll(&dir, now, |_| 0);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].state, PetState::Responding);
+        // A completed final reply = turn done -> Waiting, not a lingering Responding.
+        assert_eq!(sessions[0].state, PetState::Waiting);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
