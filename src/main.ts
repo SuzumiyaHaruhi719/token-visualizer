@@ -80,7 +80,32 @@ const CHART_STILL = {
   animation: false,
 } as const;
 
-type ChartMotion = typeof CHART_MOTION | typeof CHART_STILL;
+// Tab-switch chart "morph": bars/area/sectors TWEEN from their old values to the
+// new range's values (the user's "随动过渡" request). It deliberately animates the
+// UPDATE (`animationDurationUpdate`) much more than the ENTER: for the two ranges
+// where the over-time series KEEPS its type (today<->all stay area, 7d<->30d stay
+// bars) ECharts diffs by series `id` and tweens old->new in place. For a CROSS-type
+// switch (area<->bar) ECharts must build a fresh view, so a short, calm ENTER
+// (`animationDuration`) replaces a hard snap. Update is the headline; enter is the
+// graceful fallback. Donut sectors + project bars (stable names/ids) morph cleanly.
+const CHART_MORPH = {
+  animation: true,
+  animationDuration: 280,
+  animationDurationUpdate: 420,
+  animationEasing: "cubicOut",
+  animationEasingUpdate: "cubicOut",
+} as const;
+
+type ChartMotion = typeof CHART_MOTION | typeof CHART_STILL | typeof CHART_MORPH;
+
+// How long after a tab switch the chart morph is held back. The odometer's
+// tab-switch roll (`transitionTo`) runs a fixed 800ms rAF; an earlier build let
+// ECharts' own 520-700ms update rAF run CONCURRENTLY and the two competed for
+// frame budget, hitching the odometer (commit 3ec1860 then killed chart animation
+// entirely). We instead let the NUMBER roll alone first, then start the chart
+// morph just after it settles — the two rAF loops never overlap, so the odometer
+// stays silky AND the charts visibly morph. ~40ms pad past the 800ms roll.
+const CHART_MORPH_DELAY_MS = 840;
 
 type DonutTooltipParam = {
   name: string;
@@ -104,6 +129,17 @@ let charts: Charts | null = null;
 // Monotonic token for tab-switch fetches; only the latest one applies its
 // result (guards against out-of-order getSummary resolution on fast clicks).
 let loadSeq = 0;
+// A tab switch is mid-flight: from the instant the tab is CLICKED (synchronously,
+// before the summary fetch even resolves) until the deferred chart morph fires.
+// While this is true, the live SSE/`usage` `refreshSummary` repaints the NUMBERS
+// only and leaves the charts alone — for two reasons: (1) its ECharts rAF must not
+// compete with the odometer's 800ms roll (the original stutter), and (2) it must
+// not repaint the charts to the new range EARLY, which would pre-empt and cancel
+// out the deferred morph (the charts would just snap before beat 2 ever runs).
+// Set synchronously in `loadRange` so there is NO window between the click and the
+// fetch resolving where a refresh could sneak a chart repaint in. Distinct from a
+// pure timestamp because the click-to-fetch gap has no meaningful deadline yet.
+let chartMorphPending = false;
 
 // --- billing currency -------------------------------------------------------
 // All backend cost figures are USD; we convert on display. The chosen currency
@@ -350,6 +386,10 @@ function renderTimeseries(
   const series = defs.map(([name, key, color]) =>
     isArea
       ? {
+          // Stable `id` per channel so a same-type re-render (today<->all) is
+          // diffed by id and TWEENS old->new (the tab-switch morph) instead of
+          // re-entering. `name` drives the legend; `id` drives the data tween.
+          id: key,
           name,
           type: "line" as const,
           stack: "tok",
@@ -363,6 +403,7 @@ function renderTimeseries(
           data: s.timeseries.map((b) => b[key]),
         }
       : {
+          id: key, // same stable id so 7d<->30d (bar->bar) tweens by id
           name,
           type: "bar" as const,
           stack: "tok",
@@ -479,7 +520,11 @@ function renderProjects(
     series: [
       {
         type: "bar",
-        data: sorted.map((p) => p.tokens),
+        // Carry the project NAME on each datum (not bare numbers) so the morph
+        // diffs bars by project identity rather than by row index — when the
+        // top-8 ordering shifts between ranges, each bar tweens to its own new
+        // length instead of snapping to whatever row now sits at that index.
+        data: sorted.map((p) => ({ name: p.project, value: p.tokens })),
         itemStyle: { color: "#da7757", borderRadius: [0, 4, 4, 0] },
         barWidth: "60%",
       },
@@ -787,25 +832,80 @@ async function loadRange(range: RangeKey): Promise<void> {
   const seq = ++loadSeq;
   currentRange = range;
   setActiveTab(range);
+  // Claim the charts for THIS switch's deferred morph from the moment of the
+  // click — synchronously, BEFORE the await — so a live `refreshSummary` that
+  // fires during the fetch can't repaint the charts to the new range early (which
+  // would both fight the odometer roll and pre-empt the morph). Cleared when the
+  // morph fires (or is superseded by a newer switch).
+  chartMorphPending = true;
 
   // No panel cross-fade: dipping every block to opacity 0 read as a flicker.
   // Switching the time range should only TRANSITION the numbers (a quick roll)
   // and update the visualizations in place — never blank the panels. Out-of-order
   // fetches are dropped by the `loadSeq` guard below; background refreshes
-  // (heartbeat / SSE) self-drop via their own range-token check, so there's no
-  // `rangeSwapPending` flag to get stuck `true` if a fetch ever stalls.
-  const summary = normalizeSummary(await getSummary(range), range);
+  // (heartbeat / SSE) leave the charts alone while `chartMorphPending` is set.
+  let summary: Summary;
+  try {
+    summary = normalizeSummary(await getSummary(range), range);
+  } catch (err) {
+    // Fetch failed: don't leave `chartMorphPending` stuck `true` (it would freeze
+    // chart repaints on every later live refresh). Clear it only if WE still own
+    // the switch (a newer click would have re-armed it for itself).
+    if (seq === loadSeq) chartMorphPending = false;
+    throw err;
+  }
   if (seq !== loadSeq) return; // superseded by a newer tab switch — drop this stale result
 
-  // In-place switch: the headline total TRANSITIONS (a quick fixed-duration roll)
-  // to the new range's total; the KPI numbers tween, the by-source split
-  // transitions its segment widths from their current values, and the charts
-  // repaint. No opacity fade.
-  renderSummary(summary, "transition", undefined, CHART_STILL);
+  // In-place switch, in TWO beats so the chart morph never fights the odometer:
+  //
+  //   Beat 1 (now): the headline total TRANSITIONS (the fixed 800ms odometer
+  //   roll), the KPI numbers tween, and the by-source split slides its segment
+  //   widths — but the CHARTS are left untouched (CHART_STILL) so nothing starts
+  //   an ECharts rAF while the number is rolling.
+  //
+  //   Beat 2 (CHART_MORPH_DELAY_MS later): once the roll has settled, the charts
+  //   MORPH to the new range (bars/area/sectors tween old->new). Guarded by the
+  //   same `loadSeq` token so a newer tab click cancels this pending morph, and it
+  //   clears `chartMorphPending` so the live refresh can repaint charts again.
+  //
+  // Beat 1 updates the NUMBERS only (updateNumbers, not renderSummary) — the
+  // charts are deliberately NOT painted here so nothing animates against the
+  // roll; beat 2 (scheduleChartMorph) repaints them once the roll settles.
+  updateNumbers(summary, "transition", undefined);
+  scheduleChartMorph(seq, summary);
   // Range switched: restart the live creep at the new range's real total so it
   // doesn't carry the previous range's (much larger/smaller) projection.
   liveCreep.reset(summary.totals.tokens, Date.now());
   creepWasActive = anySessionActive;
+}
+
+// Pending tab-switch morph timer, so a rapid re-click can cancel an unfired one
+// (the `loadSeq` guard already drops a fired-but-stale morph, but clearing the
+// timer avoids a needless repaint).
+let chartMorphTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Beat 2 of a tab switch: after the odometer roll settles, morph the charts to
+ * `summary`'s range. No-ops if a newer tab switch (a higher `loadSeq`) has since
+ * won, so a stale range never repaints over the current one. Falls back to an
+ * immediate morph when timers are unavailable (jsdom/tests) so the charts still
+ * render on a range load.
+ */
+function scheduleChartMorph(seq: number, summary: Summary): void {
+  if (chartMorphTimer !== null) clearTimeout(chartMorphTimer);
+  const morph = (): void => {
+    chartMorphTimer = null;
+    // A newer tab switch owns the charts now: it re-armed `chartMorphPending`, so
+    // leave the flag set for that switch and don't repaint this stale range.
+    if (seq !== loadSeq) return;
+    chartMorphPending = false; // this switch's morph is happening — free the live refresh
+    updateCharts(summary, CHART_MORPH);
+  };
+  if (typeof setTimeout !== "function") {
+    morph();
+    return;
+  }
+  chartMorphTimer = setTimeout(morph, CHART_MORPH_DELAY_MS);
 }
 
 // --- live "creep" for the headline total -----------------------------------
@@ -849,6 +949,16 @@ async function refreshSummary(): Promise<void> {
   const summary = normalizeSummary(await getSummary(r), r);
   if (r !== currentRange) return;
   const live = liveTotalUpdate(summary);
+  // While a tab switch is mid-flight (from the click until its deferred morph
+  // fires), update the NUMBERS only and leave the charts to the morph: repainting
+  // them here would (1) start an ECharts rAF that competes with the 800ms odometer
+  // roll — the original stutter — and (2) snap the charts to the new range early,
+  // pre-empting the morph so beat 2 has nothing left to animate. Once the morph
+  // has fired (`chartMorphPending` false) live refreshes repaint charts normally.
+  if (chartMorphPending) {
+    updateNumbers(summary, live.mode, live.override);
+    return;
+  }
   renderSummary(summary, live.mode, live.override);
 }
 

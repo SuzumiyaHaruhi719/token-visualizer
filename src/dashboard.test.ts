@@ -49,16 +49,46 @@ describe("dashboard integration (mock data)", () => {
     expect(document.getElementById("kpi-cache")?.textContent).toMatch(/%$/);
   });
 
-  it("configures all three charts on range load without chart animations", async () => {
-    await bootstrap();
-    setOption.mockClear();
-    await loadRange("7d");
-    // timeseries + donut + projects each call setOption at least once, and
-    // tab-switch redraws must not start ECharts rAF animation loops that
-    // compete with the token odometer transition.
-    expect(setOption.mock.calls.length).toBeGreaterThanOrEqual(3);
-    for (const [option] of setOption.mock.calls) {
-      expect(option).toMatchObject({ animation: false });
+  it("defers the chart morph on a range switch until the odometer roll settles", async () => {
+    vi.useFakeTimers();
+    try {
+      await bootstrap();
+      setOption.mockClear();
+      await loadRange("7d");
+      // Beat 1: the numbers transition immediately, but the charts are held back
+      // so no ECharts rAF competes with the 800ms token-odometer roll — so NO
+      // chart setOption has fired yet right after the switch.
+      expect(setOption).not.toHaveBeenCalled();
+
+      // Mid-roll (before the morph fires): even though a live SSE `usage` refresh
+      // lands in this window (the mock stream emits one), the charts must NOT be
+      // repainted — a live refresh updates numbers only while a switch is pending,
+      // so it can't fight the odometer roll OR pre-empt the deferred morph.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(setOption).not.toHaveBeenCalled();
+
+      // Beat 2: once the roll settles the three charts MORPH to the new range —
+      // each calls setOption with the UPDATE tween enabled (animation on,
+      // animationDurationUpdate set), the opposite of the old animation:false snap.
+      await vi.advanceTimersByTimeAsync(800);
+      const animated = setOption.mock.calls
+        .map(([option]) => option as { animation?: boolean; animationDurationUpdate?: number })
+        .filter((o) => o.animation === true);
+      // The morph fired: all three charts repainted with the update tween enabled.
+      expect(animated.length).toBeGreaterThanOrEqual(3);
+      for (const option of animated) {
+        expect(option.animationDurationUpdate).toBeGreaterThan(0);
+      }
+      // Every chart paint that occurs is an animated morph (never a hard
+      // animation:false snap) — the morph and any post-morph live refresh both
+      // carry an update tween.
+      for (const [option] of setOption.mock.calls) {
+        const o = option as { animation?: boolean; animationDurationUpdate?: number };
+        expect(o.animation).toBe(true);
+        expect(o.animationDurationUpdate).toBeGreaterThan(0);
+      }
+    } finally {
+      vi.useRealTimers();
     }
   });
 
