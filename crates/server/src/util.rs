@@ -1,4 +1,4 @@
-//! Small shared formatting helpers used across the desktop shell.
+//! Small shared formatting helpers used across the server + desktop shell.
 
 /// Format an integer with thousands separators, e.g. `123456` -> `123,456`.
 /// Negative values keep a leading `-` (`-1234` -> `-1,234`).

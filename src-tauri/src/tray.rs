@@ -6,7 +6,7 @@
 //! session and is refreshed best-effort from the state-poll loop via
 //! [`update_tooltip`].
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cmcore::model::SessionState;
@@ -27,12 +27,11 @@ pub const TRAY_ID: &str = "cm-tray";
 /// Build the tray icon with its menu. `port` is captured so "Open Dashboard"
 /// can (re)create the dashboard window against the running server.
 /// `monitor_enabled` gates the left-click popover (toggled from the settings
-/// panel); `session_count` sizes the popover to the live session count.
+/// panel).
 pub fn build(
     app: &AppHandle,
     port: u16,
     monitor_enabled: Arc<AtomicBool>,
-    session_count: Arc<AtomicUsize>,
 ) -> tauri::Result<TrayIcon> {
     let open_item = MenuItem::with_id(app, ID_OPEN, "Open Dashboard", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, ID_QUIT, "Quit", true, None::<&str>)?;
@@ -61,8 +60,7 @@ pub fn build(
                 }
             ) && monitor_enabled.load(Ordering::Relaxed)
             {
-                let count = session_count.load(Ordering::Relaxed);
-                windows::toggle_popover(tray.app_handle(), port, count);
+                windows::toggle_popover(tray.app_handle(), port);
             }
         });
 

@@ -21,6 +21,8 @@
   --teal: #54d2b4;
   --blue: #8aa2e0;
   --gold: #e8b06a;
+  --violet: #a98bf0;       /* DeepSeek (Reasonix) */
+  --violet-deep: #8a6ee0;
 
   --radius: 16px;
   --gap: 18px;
@@ -254,7 +256,32 @@ body {
 }
 
 /* Panels ----------------------------------------------------------------- */
-.panel { padding: 18px 20px; }
+.panel {
+  padding: 18px 20px;
+  /* Elevate on hover — same restrained glass language as the KPI cards, just a
+     gentle lift so the blocks feel less flat. The base surface/shadow comes
+     from the shared `.kpi, .panel, …` glass mixin above; this only animates the
+     lift. The ticker panel opts out (it owns a solid surface + reel clipping). */
+  transition:
+    transform var(--dur-med) var(--ease-premium-pop),
+    border-color var(--dur-fast) var(--ease-premium-out),
+    box-shadow var(--dur-med) var(--ease-premium-out);
+}
+.panel:not(.ticker-panel):hover,
+.panel:not(.ticker-panel):focus-within {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.50),
+    0 6px 18px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 var(--glass-hi),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel { transition: none; }
+  .panel:not(.ticker-panel):hover,
+  .panel:not(.ticker-panel):focus-within { transform: none; }
+}
 .panel-title {
   margin: 0 0 14px;
   font-size: 0.95rem;
@@ -281,6 +308,58 @@ body {
   transition:
     opacity var(--dur-med) var(--ease-premium-out),
     transform var(--dur-med) var(--ease-premium-pop);
+}
+
+/* Block content-swap on a range tab switch -------------------------------- */
+/* Driven by transitionContentSwap()/revealContent() in src/lib/motion.ts. The
+   big KPI/total numbers keep their own silky count tween; these classes carry
+   the surrounding block (sub-text, charts, bars, gauges) so the WHOLE block
+   reads as a deliberate, UNMISTAKABLE fade + slide instead of a hard cut.
+   One-shot transitions (fired once, then settle) — deliberately no will-change
+   on these large surfaces, which previously saturated WebView2's compositor.
+
+   The fade is now decisive: the OLD content drops to opacity 0 and lifts ~16px,
+   the NEW content rises ~16px back to opacity 1. `--swap-stagger` (set per block
+   from JS) delays each block slightly so they ripple. CRITICAL: the durations
+   are long enough (~210/270ms) and the opacity travel is full (1->0->1) so the
+   dip is obvious on every tab click — the prior 0.26/160ms dip read as "nothing
+   happening" to the user. */
+.content-swap-active {
+  pointer-events: none; /* don't let clicks land mid-swap */
+}
+.content-swap-out {
+  opacity: 0;
+  transform: translateY(-16px) scale(0.99);
+  filter: saturate(0.96);
+  transition:
+    opacity 210ms var(--ease-premium-out) var(--swap-stagger, 0ms),
+    transform 210ms var(--ease-premium) var(--swap-stagger, 0ms),
+    filter 210ms var(--ease-premium-out) var(--swap-stagger, 0ms);
+}
+.content-swap-enter {
+  opacity: 0;
+  transform: translateY(16px) scale(0.99);
+  filter: saturate(0.97);
+  transition:
+    opacity 270ms var(--ease-premium-out) var(--swap-stagger, 0ms),
+    transform 270ms var(--ease-premium-pop) var(--swap-stagger, 0ms),
+    filter 270ms var(--ease-premium-out) var(--swap-stagger, 0ms);
+}
+/* Reduced-motion variant (Windows "animations off" → prefers-reduced-motion).
+   We DELIBERATELY keep a clear OPACITY fade here instead of disabling the swap:
+   the user must see SOMETHING change on a tab click even with OS animations off.
+   Only the translate/scale/filter are dropped, so it's a gentle pure fade. */
+.content-swap-out.is-reduced {
+  opacity: 0;
+  transform: none;
+  filter: none;
+  transition: opacity 200ms ease var(--swap-stagger, 0ms);
+}
+.content-swap-enter.is-reduced {
+  opacity: 0;
+  transform: none;
+  filter: none;
+  transition: opacity 260ms ease var(--swap-stagger, 0ms);
 }
 
 /* Cache panel ------------------------------------------------------------ */
@@ -323,25 +402,108 @@ body {
 .cs-row {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   min-width: 0;
 }
 .cs-empty, .cs-sep { color: var(--text-faint); }
-.cs-project { font-weight: 650; }
-.cs-model { color: var(--gold); }
-.cs-tokens { color: var(--teal); font-variant-numeric: tabular-nums; }
-.cs-state { color: var(--text-dim); text-transform: capitalize; }
-.cs-dot {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--text-faint);
-  box-shadow: 0 0 10px 1px currentColor;
+
+/* Source glyph (Claude=coral / Codex=blue / DeepSeek=violet), tinted via
+   currentColor. */
+.cs-source-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--accent);
 }
+.cs-source-icon--codex { color: var(--blue); }
+.cs-source-icon--deepseek { color: var(--violet); }
+
+/* Primary text: the LAST USER MESSAGE (project removed). Takes the row's free
+   space and truncates to a single line. */
+.cs-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cs-msg-empty { color: var(--text-faint); font-weight: 500; }
+
+/* Secondary, dimmed metadata — may be hidden on narrow widths (see media). */
+.cs-model { color: var(--gold); opacity: 0.85; flex: none; }
+.cs-tokens {
+  color: var(--teal);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  flex: none;
+}
+
+/* State as a soft filled pill (tinted fill + dot), colored per state. */
+.cs-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px var(--glass-border);
+}
+.cs-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-faint);
+  box-shadow: 0 0 8px 1px currentColor;
+  flex: none;
+}
+/* State-tinted pill text + fill. The dot keeps its own bg/color from .cs-<kind>. */
+.cs-state-working { color: #ffb38c; background: rgba(255, 138, 92, 0.16); }
+.cs-state-thinking { color: #aebdf0; background: rgba(138, 162, 224, 0.16); }
+.cs-state-responding { color: #84e0c8; background: rgba(84, 210, 180, 0.16); }
+.cs-state-waiting { color: #f0c98a; background: rgba(232, 176, 106, 0.16); }
+.cs-state-idle { color: var(--text-faint); }
+.cs-state-sleeping { color: var(--text-faint); }
 .cs-working { background: var(--accent); color: var(--accent); }
 .cs-thinking { background: var(--blue); color: var(--blue); }
 .cs-responding { background: var(--teal); color: var(--teal); }
 .cs-waiting { background: var(--gold); color: var(--gold); }
 .cs-idle { background: var(--text-faint); color: var(--text-faint); }
 .cs-sleeping { background: #555; color: #555; }
+
+/* Relative freshness ("Ns ago"), right-aligned + very dim. */
+.cs-freshness {
+  flex: none;
+  margin-left: 2px;
+  min-width: 64px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  color: rgba(232, 238, 255, 0.42);
+}
+@media (max-width: 680px) {
+  /* On narrow widths, drop the dimmed model/tokens before the freshness — the
+     message + state + age are the scannable essentials. */
+  .cs-row .cs-model,
+  .cs-row .cs-tokens { display: none; }
+}
+
+/* Active sessions (thinking / working / responding) pulse their dot so live
+   reasoning reads as active at a glance. */
+.cs-dot.cs-active { animation: cs-pulse 1.4s ease-in-out infinite; }
+@keyframes cs-pulse {
+  0%, 100% { box-shadow: 0 0 6px 0 currentColor; opacity: 0.85; }
+  50% { box-shadow: 0 0 12px 2px currentColor; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cs-dot.cs-active { animation: none; }
+}
 
 /* By-source split ------------------------------------------------------- */
 .bysource {
@@ -369,6 +531,9 @@ body {
 .bysource-seg.bysource-codex {
   background: linear-gradient(90deg, var(--teal), var(--blue));
 }
+.bysource-seg.bysource-deepseek {
+  background: linear-gradient(90deg, var(--violet), var(--violet-deep));
+}
 .bysource-chips { display: flex; gap: 12px; align-items: center; }
 .bysource-chip {
   display: inline-flex;
@@ -385,6 +550,7 @@ body {
 }
 .bysource-swatch.bysource-claude { background: var(--accent); box-shadow: 0 0 8px rgba(255, 138, 92, 0.6); }
 .bysource-swatch.bysource-codex { background: var(--teal); box-shadow: 0 0 8px rgba(84, 210, 180, 0.6); }
+.bysource-swatch.bysource-deepseek { background: var(--violet); box-shadow: 0 0 8px rgba(169, 139, 240, 0.6); }
 
 /* Live token ticker ------------------------------------------------------ */
 .ticker-panel {
@@ -553,6 +719,55 @@ body {
 }
 
 /* Session limits panel -------------------------------------------------- */
+/* Panel header row: title on the left, the subtle refresh control on the
+   right. Keeps the title's bottom margin so the body spacing is unchanged. */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.panel-head .panel-title { margin-bottom: 14px; }
+
+/* Unobtrusive circular manual-refresh icon (⟳ glyph, no label). Sits quietly
+   in the header; brightens on hover. Spins while a refresh is in flight (auto
+   or manual) so the user sees it tick. */
+.limits-refresh {
+  flex: none;
+  margin-bottom: 14px; /* align baseline with the title */
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 1rem;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color var(--dur-fast) var(--ease-premium-out),
+    background var(--dur-fast) var(--ease-premium-out);
+}
+.limits-refresh:hover {
+  color: var(--teal);
+  background: rgba(255, 255, 255, 0.06);
+}
+.limits-refresh:active { transform: translateY(1px); }
+.limits-refresh.spinning {
+  color: var(--teal);
+  animation: limits-spin 0.8s linear infinite;
+}
+@keyframes limits-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .limits-refresh.spinning { animation: none; }
+}
+
 .limits-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -763,6 +978,7 @@ body {
   color: var(--text-dim);
 }
 .settings-row-slider,
+.settings-row-select,
 .settings-row-input { align-items: center; }
 .settings-slider-wrap {
   display: flex;
@@ -851,4 +1067,27 @@ body {
   outline: none;
   border-color: rgba(255, 138, 92, 0.5);
   box-shadow: 0 0 0 1px rgba(255, 138, 92, 0.35);
+}
+
+/* Currency picker — matches the text input's glass look. */
+.settings-select {
+  width: 120px;
+  background: var(--glass-2);
+  border: 1px solid var(--glass-border);
+  border-radius: 9px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.settings-select:focus {
+  outline: none;
+  border-color: rgba(255, 138, 92, 0.5);
+  box-shadow: 0 0 0 1px rgba(255, 138, 92, 0.35);
+}
+/* The dropdown list itself renders with the OS palette; force dark options. */
+.settings-select option {
+  background: #161b27;
+  color: var(--text);
 }

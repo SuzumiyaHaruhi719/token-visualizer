@@ -33,11 +33,42 @@ pub struct Rate {
     pub input: f64,
     /// USD per million output tokens.
     pub output: f64,
+    /// Optional ABSOLUTE USD-per-million rate for cache-read (cache-hit) tokens.
+    ///
+    /// `None` (the default for Claude / Codex) keeps the historical billing rule
+    /// of [`CACHE_READ_MULTIPLIER`] × `input`. `Some(rate)` overrides that with an
+    /// explicit per-million rate — needed because some providers (e.g. DeepSeek
+    /// via Reasonix) price cache hits at a multiplier nowhere near 0.10× input,
+    /// so deriving them from `input` would skew the total cost badly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
 }
 
 impl Rate {
+    /// A rate with no explicit cache-read override (cache reads fall back to
+    /// [`CACHE_READ_MULTIPLIER`] × `input`).
     pub const fn new(input: f64, output: f64) -> Self {
-        Self { input, output }
+        Self {
+            input,
+            output,
+            cache_read: None,
+        }
+    }
+
+    /// A rate with an explicit absolute cache-read USD-per-million rate.
+    pub const fn with_cache_read(input: f64, output: f64, cache_read: f64) -> Self {
+        Self {
+            input,
+            output,
+            cache_read: Some(cache_read),
+        }
+    }
+
+    /// The effective USD-per-million cache-read rate: the explicit override when
+    /// set, else [`CACHE_READ_MULTIPLIER`] × `input` (the Claude/Codex default).
+    pub fn cache_read_rate(&self) -> f64 {
+        self.cache_read
+            .unwrap_or(self.input * CACHE_READ_MULTIPLIER)
     }
 }
 
@@ -72,6 +103,13 @@ impl PriceTable {
         let gpt5 = Rate::new(1.25, 10.0);
         let gpt5_mini = Rate::new(0.25, 2.0);
         let gpt5_nano = Rate::new(0.05, 0.40);
+        // DeepSeek (via Reasonix), USD per million tokens. Solved from the real
+        // ~/.reasonix/usage.jsonl cost field (input/cache-read/output fit the
+        // observed `costUsd` to ~0% error). Cache reads use an EXPLICIT rate
+        // because DeepSeek's cache-hit price is ~0.008× input, far from the
+        // 0.10× default — using the default would overstate cost by ~40%.
+        let deepseek_pro = Rate::with_cache_read(0.435, 0.870, 0.0036);
+        let deepseek_flash = Rate::with_cache_read(0.140, 0.280, 0.0012);
         let prefixes = vec![
             ("claude-opus-4-8".to_string(), opus),
             ("claude-opus-4".to_string(), opus),
@@ -84,6 +122,12 @@ impl PriceTable {
             ("gpt-5-mini".to_string(), gpt5_mini),
             ("gpt-5-nano".to_string(), gpt5_nano),
             ("gpt-5".to_string(), gpt5),
+            // DeepSeek (Reasonix). Longest-prefix wins, so the specific
+            // pro/flash variants are matched ahead of the bare `deepseek` rule;
+            // `deepseek` itself falls back to the pro rate for any future id.
+            ("deepseek-v4-pro".to_string(), deepseek_pro),
+            ("deepseek-v4-flash".to_string(), deepseek_flash),
+            ("deepseek".to_string(), deepseek_pro),
         ];
         Self {
             rates: HashMap::new(),
@@ -113,7 +157,7 @@ impl PriceTable {
         let cost = (usage.input as f64) * rate.input
             + (usage.output as f64) * rate.output
             + (usage.cache_create as f64) * rate.input * CACHE_CREATE_MULTIPLIER
-            + (usage.cache_read as f64) * rate.input * CACHE_READ_MULTIPLIER;
+            + (usage.cache_read as f64) * rate.cache_read_rate();
         Some(cost / PER_MILLION)
     }
 
@@ -131,6 +175,24 @@ impl PriceTable {
     /// Parse a table from JSON.
     pub fn from_json(s: &str) -> Result<Self> {
         Ok(serde_json::from_str(s)?)
+    }
+
+    /// Fill in any seeded prefix rule this table is MISSING (matched by prefix
+    /// string), preserving every existing user override. This lets a persisted
+    /// `pricing.json` written before a new model family was added (e.g. DeepSeek)
+    /// still resolve a cost for that family, instead of returning `None` until the
+    /// user resets the file. User-customized prefixes are never overwritten.
+    pub fn merge_seed_defaults(&mut self) {
+        let existing: std::collections::HashSet<&str> =
+            self.prefixes.iter().map(|(p, _)| p.as_str()).collect();
+        let missing: Vec<(String, Rate)> = Self::seeded()
+            .prefixes
+            .into_iter()
+            .filter(|(p, _)| !existing.contains(p.as_str()))
+            .collect();
+        // Avoid borrowing `self` immutably and mutably at once.
+        drop(existing);
+        self.prefixes.extend(missing);
     }
 }
 

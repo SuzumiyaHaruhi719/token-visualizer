@@ -32,7 +32,7 @@ export interface TimeseriesBucket {
   cacheRead: number;
 }
 
-export type Source = "claude" | "codex";
+export type Source = "claude" | "codex" | "deepseek";
 
 export interface BySource {
   source: Source;
@@ -107,20 +107,36 @@ export interface SessionState {
   model: string;
   state: PetState;
   tokens: number;
+  /** Epoch millis of this session's LAST ACTIVITY (newest log line), NOT the
+   *  poll time. Render staleness from it (e.g. "1m 49s ago"); a live session
+   *  mid-work keeps its real state while this value ages. */
   updatedAt: number;
+  /** The most recent USER prompt text for this session (a real prompt, not a
+   *  tool result or injected wrapper), single-line and capped. Shown in place of
+   *  the project name. Optional so existing fixtures / payloads without the field
+   *  keep working; absent is treated as empty. */
+  lastUserMessage?: string;
+  /** Which agent the live session belongs to. Optional so existing fixtures /
+   *  payloads without the field keep working; absent is treated as "claude". */
+  source?: Source;
 }
 
-export type RangeKey = "today" | "7d" | "30d" | "all";
+export type RangeKey = "today" | "month" | "7d" | "30d" | "all";
 
 // /api/settings -------------------------------------------------------------
 
 /** Runtime + persisted app settings (mirrors the server `/api/settings` shape). */
 export interface AppSettings {
-  petsEnabled: boolean;
   monitorEnabled: boolean;
+  /** Whether the session-end notification (toast + taskbar flash) fires. */
+  notificationsEnabled: boolean;
   soundEnabled: boolean;
   /** Chime volume as a 0..1 float. */
   soundVolume: number;
+  /** Popover background opacity percent (0..100) — alpha of the acrylic CSS tint. */
+  popoverOpacity: number;
+  /** Billing display currency ISO code (USD/CNY/HKD/EUR/JPY/GBP). */
+  currency: string;
   discordEnabled: boolean;
   discordClientId: string | null;
 }

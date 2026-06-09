@@ -5,10 +5,12 @@ import type { AppSettings, AppSettingsPatch } from "../lib/types";
 
 function settings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
-    petsEnabled: true,
     monitorEnabled: true,
+    notificationsEnabled: true,
     soundEnabled: true,
     soundVolume: 0.8,
+    popoverOpacity: 85,
+    currency: "USD",
     discordEnabled: false,
     discordClientId: null,
     ...overrides,
@@ -36,7 +38,6 @@ describe("createSettingsPanel", () => {
     const panel = createSettingsPanel(host, deps);
     await panel.open();
 
-    expect(host.querySelector('[data-field="petsEnabled"]')).toBeTruthy();
     expect(host.querySelector('[data-field="monitorEnabled"]')).toBeTruthy();
     expect(host.querySelector('[data-field="soundEnabled"]')).toBeTruthy();
     const slider = host.querySelector<HTMLInputElement>('[data-field="soundVolume"]');
@@ -55,11 +56,53 @@ describe("createSettingsPanel", () => {
     });
     await panel.open();
 
-    const pets = host.querySelector<HTMLInputElement>('[data-field="petsEnabled"]')!;
-    pets.checked = false;
-    pets.dispatchEvent(new Event("change"));
+    const monitor = host.querySelector<HTMLInputElement>('[data-field="monitorEnabled"]')!;
+    monitor.checked = false;
+    monitor.dispatchEvent(new Event("change"));
 
-    expect(updateSettings).toHaveBeenCalledWith({ petsEnabled: false });
+    expect(updateSettings).toHaveBeenCalledWith({ monitorEnabled: false });
+  });
+
+  it("persists the chosen currency on select change", async () => {
+    const host = mount();
+    const updateSettings = vi.fn(async (p: AppSettingsPatch) => settings(p));
+    const panel = createSettingsPanel(host, {
+      getSettings: vi.fn(async () => settings({ currency: "USD" })),
+      updateSettings,
+    });
+    await panel.open();
+
+    const select = host.querySelector<HTMLSelectElement>('[data-field="currency"]')!;
+    expect(select.value).toBe("USD");
+    select.value = "CNY";
+    select.dispatchEvent(new Event("change"));
+
+    expect(updateSettings).toHaveBeenCalledWith({ currency: "CNY" });
+  });
+
+  it("debounces the tray-background opacity slider into a single update", async () => {
+    vi.useFakeTimers();
+    const host = mount();
+    const updateSettings = vi.fn(async (p: AppSettingsPatch) => settings(p));
+    const panel = createSettingsPanel(host, {
+      getSettings: vi.fn(async () => settings({ popoverOpacity: 85 })),
+      updateSettings,
+    });
+    await panel.open();
+
+    const slider = host.querySelector<HTMLInputElement>('[data-field="popoverOpacity"]')!;
+    expect(slider.value).toBe("85");
+    slider.value = "50";
+    slider.dispatchEvent(new Event("input"));
+    slider.value = "60";
+    slider.dispatchEvent(new Event("input"));
+    expect(host.querySelector("[data-opacity-value]")?.textContent).toBe("60%");
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(200);
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings).toHaveBeenCalledWith({ popoverOpacity: 60 });
+    vi.useRealTimers();
   });
 
   it("debounces the volume slider into a single update", async () => {
@@ -134,7 +177,7 @@ describe("createSettingsPanel", () => {
     const slider = host.querySelector<HTMLInputElement>('[data-field="soundVolume"]');
     expect(slider?.value).toBe("80");
     expect(
-      host.querySelector<HTMLInputElement>('[data-field="petsEnabled"]')?.checked,
+      host.querySelector<HTMLInputElement>('[data-field="monitorEnabled"]')?.checked,
     ).toBe(true);
   });
 

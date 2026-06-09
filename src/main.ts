@@ -10,14 +10,28 @@ import {
   subscribe,
   getSettings,
   updateSettings,
+  getFx,
 } from "./lib/api";
 import { createSettingsPanel } from "./components/settings-panel";
-import { formatTokens, formatCost, formatPct, formatInt } from "./lib/format";
+import { formatTokens, formatPct, formatInt } from "./lib/format";
+import {
+  formatCost as formatCurrency,
+  asCurrency,
+  type CurrencyCode,
+  type FxRates,
+} from "./lib/currency";
 import { animateNumber } from "./lib/tween";
-import { animateHeightChange, revealOnNextFrame } from "./lib/motion";
+import {
+  animateHeightChange,
+  revealOnNextFrame,
+  revealContent,
+  formatFreshness,
+  sourceIconSvg,
+} from "./lib/motion";
 import { renderLimits, tickCountdowns } from "./components/limits";
 import { renderBySource } from "./components/by-source";
 import { renderTokenTicker, updateTokenTicker } from "./components/token-ticker";
+import { LiveCreep } from "./lib/live-creep";
 import type {
   Summary,
   SessionState,
@@ -26,7 +40,17 @@ import type {
   Totals,
   BySource,
   Limits,
+  Source,
 } from "./lib/types";
+
+/** The known source ids; anything else (or absent) normalizes to "claude". */
+const KNOWN_SOURCES: readonly Source[] = ["claude", "codex", "deepseek"];
+
+/** Narrow an untrusted source value from the API to a known {@link Source}.
+ *  Absent / unknown -> "claude" (the backend defaults Claude sessions). */
+function normalizeSource(value: unknown): Source {
+  return KNOWN_SOURCES.includes(value as Source) ? (value as Source) : "claude";
+}
 
 const RANGES: { key: RangeKey; label: string }[] = [
   { key: "today", label: "Today" },
@@ -71,10 +95,40 @@ type Charts = {
 };
 
 let currentRange: RangeKey = "today";
+// The range whose data is actually RENDERED right now. Distinct from
+// `currentRange` (the selected/requested range): it only advances when a load
+// truly applies its summary. Used so the cross-fade fires for the winning
+// render even after a rapid double-click, and so background refreshes can tell
+// a range swap is still pending.
 let charts: Charts | null = null;
 // Monotonic token for tab-switch fetches; only the latest one applies its
 // result (guards against out-of-order getSummary resolution on fast clicks).
 let loadSeq = 0;
+
+// --- billing currency -------------------------------------------------------
+// All backend cost figures are USD; we convert on display. The chosen currency
+// comes from /api/settings and the USD-based rates from /api/fx (cached daily).
+// Both are refreshed on load and whenever the settings panel changes them.
+let currentCurrency: CurrencyCode = "USD";
+let currentRates: FxRates = {};
+
+/** Currency-aware cost format using the live currency + rates. */
+function fmtCost(usd: number | null | undefined): string {
+  return formatCurrency(usd, currentCurrency, currentRates);
+}
+
+/** Refresh the chosen currency (from settings) + USD-based rates (from /api/fx),
+ *  then repaint the cost readouts so a currency change applies immediately. */
+async function refreshCurrency(): Promise<void> {
+  const [settings, fx] = await Promise.all([getSettings(), getFx()]);
+  currentCurrency = asCurrency(settings.currency);
+  currentRates = fx.rates ?? {};
+  // Re-render the KPI cost in place (no tween) so a currency switch is instant.
+  const node = document.getElementById("kpi-cost");
+  if (node && lastValues.has("kpi-cost")) {
+    node.textContent = fmtCost(lastValues.get("kpi-cost")!);
+  }
+}
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -136,7 +190,11 @@ function renderShell(root: HTMLElement): void {
     </div>
 
     <section class="panel">
-      <h2 class="panel-title">Session limits</h2>
+      <div class="panel-head">
+        <h2 class="panel-title">Session limits</h2>
+        <button class="limits-refresh" id="limits-refresh" type="button"
+                aria-label="Refresh limits" title="Refresh">⟳</button>
+      </div>
       <div id="limits-body">
         <span class="cs-empty">Loading limits…</span>
       </div>
@@ -179,7 +237,12 @@ function bucketLabel(iso: string, range: RangeKey): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   if (range === "today") {
-    return d.toLocaleTimeString([], { hour: "2-digit" });
+    // The backend already bakes the user's LOCAL wall-clock hour into the bucket
+    // string but tags it with a misleading "Z" (a 01:00-local event becomes
+    // "...T01:00:00Z"). Render that baked hour AS-IS with timeZone:"UTC" so we
+    // don't re-apply the local offset a second time (which turned 01 into 09 at
+    // UTC+8). See crates/core/src/query.rs `query_timeseries`.
+    return d.toLocaleTimeString([], { hour: "2-digit", timeZone: "UTC" });
   }
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
@@ -227,7 +290,7 @@ function normalizeSummary(input: Summary | null | undefined, fallbackRange: Rang
       tokens: finiteNumber(p?.tokens),
     })),
     bySource: (Array.isArray(raw.bySource) ? raw.bySource : []).map((b) => ({
-      source: b?.source === "codex" ? "codex" : "claude",
+      source: normalizeSource(b?.source),
       tokens: finiteNumber(b?.tokens),
       costUsd: finiteNullable(b?.costUsd),
     })) as BySource[],
@@ -457,7 +520,7 @@ function retweenCost(costUsd: number | null): void {
   }
   const from = lastValues.get("kpi-cost") ?? 0;
   lastValues.set("kpi-cost", costUsd);
-  animateNumber(node, from, costUsd, { format: (v) => formatCost(v) });
+  animateNumber(node, from, costUsd, { format: (v) => fmtCost(v) });
 }
 
 /** Tween the combined "sessions / messages" line; both numbers animate. */
@@ -492,24 +555,88 @@ function renderCachePanel(s: Summary): void {
 // so live updates tween from the prior value instead of snapping or restarting.
 const lastSessionTokens = new Map<string, number>();
 
+// Human-friendly label per pet-state kind. The backend now distinguishes
+// reasoning (thinking) from tool runs (working) and text output (responding),
+// so the strip reflects what each session is actually doing instead of
+// collapsing everything to "responding".
+const STATE_LABELS: Record<SessionState["state"]["kind"], string> = {
+  thinking: "thinking",
+  working: "working",
+  responding: "responding",
+  waiting: "waiting",
+  idle: "idle",
+  sleeping: "sleeping",
+};
+
 function stateLabelFor(state: SessionState["state"]): string {
-  return state.kind === "working" && state.tool
-    ? `working · ${state.tool}`
-    : state.kind;
+  if (state.kind === "working") {
+    return state.tool ? `working · ${state.tool}` : "working";
+  }
+  return STATE_LABELS[state.kind];
+}
+
+/** Active states drive a subtle pulse on the strip dot (reasoning counts). */
+const ACTIVE_KINDS: ReadonlySet<SessionState["state"]["kind"]> = new Set([
+  "thinking",
+  "working",
+  "responding",
+]);
+
+function isActiveState(state: SessionState["state"]): boolean {
+  return ACTIVE_KINDS.has(state.kind);
+}
+
+/** A session's source; absent / unknown means Claude (older payloads omit the
+ *  field and the backend defaults Claude sessions). Used to pick the live-strip
+ *  source glyph + accent (Claude / Codex / DeepSeek). */
+function sessionSource(s: SessionState): Source {
+  return normalizeSource(s.source);
+}
+
+/** The optional last-user-message, trimmed; "" when absent/blank. */
+function lastUserMessageOf(s: SessionState): string {
+  return typeof s.lastUserMessage === "string" ? s.lastUserMessage.trim() : "";
+}
+
+/** The last user message for a session row's primary text. Falls back to a
+ *  muted placeholder when the backend hasn't captured one yet (older payloads /
+ *  a session that has only system turns so far). */
+function sessionMessage(s: SessionState): string {
+  const msg = lastUserMessageOf(s);
+  return msg.length > 0 ? msg : "—";
 }
 
 function sessionRowMarkup(session: SessionState, entering: boolean): string {
+  const dotActive = isActiveState(session.state) ? " cs-active" : "";
+  const source = sessionSource(session);
+  const hasMsg = lastUserMessageOf(session).length > 0;
+  const id = escapeHtml(session.sessionId);
+  // Primary text is the LAST USER MESSAGE (project name removed, per spec). The
+  // source icon precedes it; model + tokens are dimmed secondary; the state pill
+  // and a live freshness label trail. Freshness is re-rendered on the heartbeat
+  // via the data-updated attr (see refreshFreshness).
   return `
-    <div class="cs-row${entering ? " ui-enter" : ""}" data-session="${escapeHtml(session.sessionId)}">
-      <span class="cs-dot cs-${session.state.kind}"></span>
-      <span class="cs-project">${escapeHtml(session.project)}</span>
-      <span class="cs-sep">·</span>
+    <div class="cs-row${entering ? " ui-enter" : ""}" data-session="${id}">
+      ${sourceIconSvg(source, "cs-source-icon")}
+      <span class="cs-msg${hasMsg ? "" : " cs-msg-empty"}" title="${escapeHtml(sessionMessage(session))}">${escapeHtml(sessionMessage(session))}</span>
       <span class="cs-model">${escapeHtml(session.model.replace("claude-", ""))}</span>
-      <span class="cs-sep">·</span>
-      <span class="cs-tokens" data-session="${escapeHtml(session.sessionId)}">${formatTokens(session.tokens)} tok</span>
-      <span class="cs-sep">·</span>
-      <span class="cs-state">${escapeHtml(stateLabelFor(session.state))}</span>
+      <span class="cs-tokens" data-session="${id}">${formatTokens(session.tokens)} tok</span>
+      <span class="cs-state cs-state-${session.state.kind}"><span class="cs-dot cs-${session.state.kind}${dotActive}"></span>${escapeHtml(stateLabelFor(session.state))}</span>
+      <span class="cs-freshness" data-updated="${Number.isFinite(session.updatedAt) ? session.updatedAt : ""}">${escapeHtml(formatFreshness(session.updatedAt))}</span>
     </div>`;
+}
+
+/** Re-render every visible row's freshness label from its `data-updated` epoch
+ *  stamp. Cheap text-only update run on the heartbeat tick so "Ns ago" advances
+ *  live without rebuilding the rows (which would restart token tweens). */
+function refreshFreshness(nowMs: number = Date.now()): void {
+  const strip = document.getElementById("current-strip");
+  if (!strip) return;
+  strip.querySelectorAll<HTMLElement>(".cs-freshness[data-updated]").forEach((node) => {
+    const raw = node.getAttribute("data-updated");
+    if (!raw) return;
+    node.textContent = formatFreshness(Number(raw), nowMs);
+  });
 }
 
 /**
@@ -632,6 +759,24 @@ function renderSummary(
   updateCharts(summary, chartMotion);
 }
 
+/**
+ * The major dashboard blocks that cross-fade on a range switch: the KPI
+ * cluster, the by-source split, and each ECharts panel + the limits panel
+ * (faded by their `.panel` wrapper, so title + canvas move as one object and
+ * ECharts sizing is never touched). Re-queried each call since `renderSummary`
+ * may replace some internals.
+ */
+function blockSwapTargets(): (Element | null)[] {
+  return [
+    document.querySelector(".kpis"),
+    document.getElementById("bysource"),
+    document.getElementById("chart-timeseries")?.closest(".panel") ?? null,
+    document.getElementById("chart-donut")?.closest(".panel") ?? null,
+    document.getElementById("chart-projects")?.closest(".panel") ?? null,
+    document.getElementById("limits-body")?.closest(".panel") ?? null,
+  ];
+}
+
 async function loadRange(range: RangeKey): Promise<void> {
   // Sequence guard: fast tab clicks fire overlapping loadRange calls whose
   // getSummary fetches can resolve OUT OF ORDER. Without this, a stale (earlier)
@@ -642,19 +787,69 @@ async function loadRange(range: RangeKey): Promise<void> {
   const seq = ++loadSeq;
   currentRange = range;
   setActiveTab(range);
+
+  // No panel cross-fade: dipping every block to opacity 0 read as a flicker.
+  // Switching the time range should only TRANSITION the numbers (a quick roll)
+  // and update the visualizations in place — never blank the panels. Out-of-order
+  // fetches are dropped by the `loadSeq` guard below; background refreshes
+  // (heartbeat / SSE) self-drop via their own range-token check, so there's no
+  // `rangeSwapPending` flag to get stuck `true` if a fetch ever stalls.
   const summary = normalizeSummary(await getSummary(range), range);
   if (seq !== loadSeq) return; // superseded by a newer tab switch — drop this stale result
-  // Seamless tab switch: the total TRANSITIONS (a quick fixed-duration roll) to
-  // the new range's total. The heartbeat keeps running — its raise-only creep
-  // can't disturb a downward spin and just resumes the roll once the transition
-  // lands, so there is no pause.
+
+  // In-place switch: the headline total TRANSITIONS (a quick fixed-duration roll)
+  // to the new range's total; the KPI numbers tween, the by-source split
+  // transitions its segment widths from their current values, and the charts
+  // repaint. No opacity fade.
   renderSummary(summary, "transition", undefined, CHART_STILL);
+  // Range switched: restart the live creep at the new range's real total so it
+  // doesn't carry the previous range's (much larger/smaller) projection.
+  liveCreep.reset(summary.totals.tokens, Date.now());
+  creepWasActive = anySessionActive;
+}
+
+// --- live "creep" for the headline total -----------------------------------
+// The big "Total tokens · live" reel must keep rolling while ANY session is
+// active, but real totals only step per completed message. `liveCreep` projects
+// a continuously-advancing total in those gaps (see lib/live-creep.ts) and we
+// feed it through the ticker's `totalOverride`; the per-model rows keep their
+// EXACT real values. When no session is active it reconciles to the real total
+// and stops, so the rAF frees the event loop (preserves the old freeze fix).
+const liveCreep = new LiveCreep();
+let anySessionActive = false;
+let creepWasActive = false;
+
+/** Update the active-session flag from a freshly-known session list. */
+function noteSessions(sessions: SessionState[]): void {
+  anySessionActive = sessions.some((s) => isActiveState(s.state));
+}
+
+/** Feed the creep the latest real total + activity; return the ticker mode +
+ *  optional override so the big total rolls continuously while active and eases
+ *  back down to the exact total the moment everything goes idle. */
+function liveTotalUpdate(summary: Summary): { mode: TickerMode; override?: number } {
+  const now = Date.now();
+  liveCreep.observeReal(summary.totals.tokens, now);
+  liveCreep.setActive(anySessionActive);
+  const override = liveCreep.tick(now);
+  if (creepWasActive && !anySessionActive) {
+    creepWasActive = false;
+    return { mode: "transition" }; // active -> idle: ease DOWN to the real total
+  }
+  creepWasActive = anySessionActive;
+  return anySessionActive ? { mode: "roll", override } : { mode: "roll" };
 }
 
 /** Re-fetch the current range's summary and re-render KPIs + charts in place. */
 async function refreshSummary(): Promise<void> {
-  const summary = normalizeSummary(await getSummary(currentRange), currentRange);
-  renderSummary(summary, "roll");
+  // Capture the range we're fetching for; if a tab switch changes it while the
+  // fetch is in flight, drop the result — applying old-range data would retarget
+  // the raise-only live creep to a stale total.
+  const r = currentRange;
+  const summary = normalizeSummary(await getSummary(r), r);
+  if (r !== currentRange) return;
+  const live = liveTotalUpdate(summary);
+  renderSummary(summary, live.mode, live.override);
 }
 
 // --- 2Hz numeric heartbeat -------------------------------------------------
@@ -687,14 +882,25 @@ async function heartbeatTick(): Promise<void> {
   if (heartbeatInFlight) return; // never let ticks overlap on a slow fetch
   heartbeatInFlight = true;
   try {
+    const r = currentRange;
     const [summary, sessions] = await Promise.all([
-      getSummary(currentRange),
+      getSummary(r),
       getSessions(),
     ]);
-    // Roll toward the real total; setTarget eases up and converges (stops),
-    // so there is no perpetually-running animation frame.
-    updateNumbers(normalizeSummary(summary, currentRange), "roll");
+    noteSessions(sessions); // refresh the active flag BEFORE the creep reads it
+    // Keep the headline total rolling continuously while any session is active
+    // (live creep); per-model rows still track their exact real values. Drop the
+    // range-dependent numeric repaint if the range changed during the fetch (that
+    // data is for the OLD range; applying it would retarget the raise-only creep
+    // to a stale total). The session strip is range-independent, so it always
+    // refreshes.
+    if (r === currentRange) {
+      const norm = normalizeSummary(summary, r);
+      const live = liveTotalUpdate(norm);
+      updateNumbers(norm, live.mode, live.override);
+    }
     renderSessions(sessions);
+    refreshFreshness(); // advance each row's "Ns ago" without rebuilding rows
   } finally {
     heartbeatInFlight = false;
   }
@@ -714,13 +920,44 @@ function startHeartbeat(): void {
 }
 
 let lastLimits: Limits | null = null;
+// Guard so overlapping refreshes (auto-timer + manual click) don't double-fetch
+// or leave the spinner stuck if one resolves while another is mid-flight.
+let limitsInFlight = false;
+// Auto-refresh the limits panel every N seconds (the countdown interval runs at
+// 1Hz, so this is a tick count). ~5s keeps the Codex % fresh without hammering.
+const LIMITS_REFRESH_TICKS = 5;
 
-/** Fetch limits and render the panel; remembers the snapshot for countdown ticks. */
+/** Spin the refresh icon while a limits refresh is running (CSS rotation,
+ *  honoring prefers-reduced-motion). No-op if the button isn't mounted. */
+function setLimitsSpinning(spinning: boolean): void {
+  const btn = document.getElementById("limits-refresh");
+  if (btn) btn.classList.toggle("spinning", spinning);
+}
+
+/** Fetch limits and render the panel; remembers the snapshot for countdown
+ *  ticks. Spins the refresh icon for the duration of the fetch (auto + manual).
+ *  Overlapping calls are coalesced via `limitsInFlight`. */
 async function refreshLimits(): Promise<void> {
-  const limits = await getLimits();
-  lastLimits = limits;
-  const body = el("limits-body");
-  animateHeightChange(body, () => renderLimits(body, limits));
+  if (limitsInFlight) return;
+  limitsInFlight = true;
+  setLimitsSpinning(true);
+  try {
+    const limits = await getLimits();
+    lastLimits = limits; // keep the latest snapshot for the 1s countdown ticks
+    const body = el("limits-body");
+    // Skip the repaint when nothing changed AND the panel is already rendered:
+    // refreshLimits runs on every `usage` SSE frame, so re-rendering identical
+    // data made the Codex gauges look like they were constantly auto-refreshing.
+    // The signature lives on the body itself (not a module var) so a fresh /
+    // re-initialized body always repaints.
+    const sig = JSON.stringify(limits);
+    if (body.dataset.limitsSig === sig && body.childElementCount > 0) return;
+    body.dataset.limitsSig = sig;
+    animateHeightChange(body, () => renderLimits(body, limits));
+  } finally {
+    limitsInFlight = false;
+    setLimitsSpinning(false);
+  }
 }
 
 // Debounce live summary refreshes so a burst of SSE frames coalesces into one
@@ -744,6 +981,7 @@ function scheduleSummaryRefresh(): void {
 function handleEvent(ev: CmServerEvent): void {
   if (ev.type === "sessions") {
     // Authoritative live list: one card per active session.
+    noteSessions(ev.data); // keep the creep's active gate in sync with live state
     renderSessions(ev.data);
   } else if (ev.type === "usage") {
     // A single session changed — refresh the KPI row + token ticker (which the
@@ -764,11 +1002,42 @@ function handleEvent(ev: CmServerEvent): void {
   }
 }
 
+/** Tauri's injected IPC bridge (present only when running inside the app). */
+interface TauriInternals {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+}
+function tauriInternals(): TauriInternals | null {
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: TauriInternals })
+    .__TAURI_INTERNALS__;
+  return internals && typeof internals.invoke === "function" ? internals : null;
+}
+
+/** F11 toggles borderless fullscreen on the dashboard window (browser-style).
+ *  No-op outside Tauri (plain browser / vitest). Uses the window plugin IPC —
+ *  the `value` arg name matches Tauri's `set_fullscreen` command. */
+function setupFullscreenToggle(): void {
+  const internals = tauriInternals();
+  if (!internals) return;
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "F11") return;
+    e.preventDefault();
+    void (async () => {
+      try {
+        const current = (await internals.invoke("plugin:window|is_fullscreen")) as boolean;
+        await internals.invoke("plugin:window|set_fullscreen", { value: !current });
+      } catch {
+        // best-effort: ignore if denied / unavailable
+      }
+    })();
+  });
+}
+
 async function bootstrap(): Promise<void> {
   const root = el("app");
   renderShell(root);
   charts = initCharts();
   renderTokenTicker(el("token-ticker"), null);
+  setupFullscreenToggle();
 
   el("range-tabs").addEventListener("click", (e) => {
     const target = (e.target as HTMLElement).closest<HTMLButtonElement>(".range-tab");
@@ -776,22 +1045,62 @@ async function bootstrap(): Promise<void> {
     void loadRange(target.dataset.range as RangeKey);
   });
 
-  // Settings gear -> the consolidated settings panel (pets / monitor / sound /
-  // volume / Discord). Mounted lazily into its own host so it overlays cleanly.
+  // Settings gear -> the consolidated settings panel (monitor / sound / volume /
+  // currency / tray background / Discord). Mounted lazily into its own host so
+  // it overlays cleanly. We wrap `updateSettings` so a currency change repaints
+  // the cost readouts immediately (the rates are already cached client-side).
   const settingsPanel = createSettingsPanel(el("settings-mount"), {
     getSettings,
-    updateSettings,
+    updateSettings: async (patch) => {
+      const next = await updateSettings(patch);
+      if (patch.currency !== undefined) {
+        currentCurrency = asCurrency(next.currency);
+        const node = document.getElementById("kpi-cost");
+        if (node && lastValues.has("kpi-cost")) {
+          node.textContent = fmtCost(lastValues.get("kpi-cost")!);
+        }
+      }
+      return next;
+    },
   });
   el("settings-gear").addEventListener("click", () => void settingsPanel.open());
+
+  // Billing currency + USD-based FX rates (cached daily server-side). Fetched
+  // before the first paint so costs render in the chosen currency from the off.
+  await refreshCurrency();
 
   await loadRange(currentRange);
   renderSessions(await getSessions());
   await refreshLimits();
 
-  // Tick the reset countdowns once per second without re-rendering markup.
+  // First-mount entrance: now that every block has content, ease them in (fade
+  // + rise) rather than popping. Reduced-motion / test envs no-op cleanly.
+  revealContent(blockSwapTargets());
+
+  // Subtle manual refresh: the ⟳ icon in the panel header. Refreshes both the
+  // limits panel (Codex %) and the summary (totals), spinning while in flight.
+  el("limits-refresh").addEventListener("click", () => {
+    void refreshLimits();
+    void refreshSummary();
+  });
+
+  // Tick the reset countdowns once per second without re-rendering markup, and
+  // AUTO-REFRESH the limits panel every LIMITS_REFRESH_TICKS seconds. The live
+  // poller only watches ~/.claude, so Codex-only activity fires no SSE and the
+  // panel would otherwise freeze at the bootstrap value — this steady cadence
+  // keeps the Codex rate-limit % as fresh as the rollout allows. Visibility-
+  // gated (like the heartbeat) so we don't poll while the window is hidden.
   if (typeof setInterval === "function") {
+    let limitsTick = 0;
     setInterval(() => {
       if (lastLimits) tickCountdowns(el("limits-body"));
+      refreshFreshness(); // 1Hz so each session row's "Ns ago" advances live
+      const visible =
+        typeof document === "undefined" || document.visibilityState === "visible";
+      if (visible && ++limitsTick >= LIMITS_REFRESH_TICKS) {
+        limitsTick = 0;
+        void refreshLimits();
+      }
     }, 1_000);
   }
 
@@ -816,4 +1125,4 @@ if (typeof document !== "undefined") {
   }
 }
 
-export { loadRange, handleEvent, renderCurrent, renderSessions, bootstrap, normalizeSummary };
+export { loadRange, handleEvent, renderCurrent, renderSessions, bootstrap, normalizeSummary, bucketLabel };

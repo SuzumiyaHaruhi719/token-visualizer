@@ -1,6 +1,6 @@
 // Settings panel: a glass modal that consolidates every app toggle in one
-// place (desktop pets, tray monitor, session-end sound + volume, and the
-// optional Discord status config). Opened from the dashboard topbar gear.
+// place (tray monitor, session-end notification, session-end sound + volume,
+// and the optional Discord status config). Opened from the dashboard topbar gear.
 //
 // The panel fetches the live settings on open and writes each change back via
 // the injected `updateSettings` (PUT /api/settings). Toggles persist instantly;
@@ -8,6 +8,7 @@
 // Designed to render entirely within view (the app hides scrollbars globally).
 
 import type { AppSettings, AppSettingsPatch } from "../lib/types";
+import { CURRENCIES } from "../lib/currency";
 
 /** Injectable backend hooks (real api in the app; stubs in tests). */
 export interface SettingsPanelDeps {
@@ -30,10 +31,20 @@ function toPercent(volume: number): number {
   return Math.round(Math.min(1, Math.max(0, volume)) * 100);
 }
 
+/** Clamp an opacity percent to the 0..100 integer the slider expects. */
+function toOpacityPct(value: number): number {
+  if (!Number.isFinite(value)) return 85;
+  return Math.round(Math.min(100, Math.max(0, value)));
+}
+
 /** The panel markup. Controls are seeded from `s`; the sound slider is disabled
  *  when sound is off. */
 function panelMarkup(s: AppSettings): string {
   const pct = toPercent(s.soundVolume);
+  const opacityPct = toOpacityPct(s.popoverOpacity);
+  const currencyOptions = CURRENCIES.map(
+    (c) => `<option value="${c}"${s.currency === c ? " selected" : ""}>${c}</option>`,
+  ).join("");
   return `
     <div class="settings-overlay" data-settings-overlay>
       <div class="settings-card" role="dialog" aria-label="Settings">
@@ -44,13 +55,13 @@ function panelMarkup(s: AppSettings): string {
 
         <div class="settings-rows">
           <label class="settings-row">
-            <span class="settings-row-label">Desktop pets</span>
-            <input class="settings-toggle" type="checkbox" data-field="petsEnabled" ${s.petsEnabled ? "checked" : ""} />
+            <span class="settings-row-label">Tray monitor</span>
+            <input class="settings-toggle" type="checkbox" data-field="monitorEnabled" ${s.monitorEnabled ? "checked" : ""} />
           </label>
 
           <label class="settings-row">
-            <span class="settings-row-label">Tray monitor</span>
-            <input class="settings-toggle" type="checkbox" data-field="monitorEnabled" ${s.monitorEnabled ? "checked" : ""} />
+            <span class="settings-row-label">Session-end notification</span>
+            <input class="settings-toggle" type="checkbox" data-field="notificationsEnabled" ${s.notificationsEnabled ? "checked" : ""} />
           </label>
 
           <label class="settings-row">
@@ -64,6 +75,20 @@ function panelMarkup(s: AppSettings): string {
               <input class="settings-slider" type="range" min="0" max="100" step="1"
                      value="${pct}" data-field="soundVolume" ${s.soundEnabled ? "" : "disabled"} />
               <span class="settings-volume-value" data-volume-value>${pct}%</span>
+            </div>
+          </div>
+
+          <label class="settings-row settings-row-select">
+            <span class="settings-row-label">Billing currency</span>
+            <select class="settings-select" data-field="currency">${currencyOptions}</select>
+          </label>
+
+          <div class="settings-row settings-row-slider">
+            <span class="settings-row-label">Tray background</span>
+            <div class="settings-slider-wrap">
+              <input class="settings-slider" type="range" min="20" max="100" step="1"
+                     value="${opacityPct}" data-field="popoverOpacity" />
+              <span class="settings-volume-value" data-opacity-value>${opacityPct}%</span>
             </div>
           </div>
 
@@ -98,13 +123,16 @@ export function createSettingsPanel(
   deps: SettingsPanelDeps,
 ): SettingsPanel {
   let volumeTimer: ReturnType<typeof setTimeout> | null = null;
+  let opacityTimer: ReturnType<typeof setTimeout> | null = null;
   let current: AppSettings | null = null;
 
   const fallback = (): AppSettings => ({
-    petsEnabled: true,
     monitorEnabled: true,
+    notificationsEnabled: true,
     soundEnabled: true,
     soundVolume: 0.8,
+    popoverOpacity: 85,
+    currency: "USD",
     discordEnabled: false,
     discordClientId: null,
   });
@@ -113,6 +141,10 @@ export function createSettingsPanel(
     if (volumeTimer !== null) {
       clearTimeout(volumeTimer);
       volumeTimer = null;
+    }
+    if (opacityTimer !== null) {
+      clearTimeout(opacityTimer);
+      opacityTimer = null;
     }
     container.innerHTML = "";
   }
@@ -167,6 +199,27 @@ export function createSettingsPanel(
       volumeTimer = setTimeout(() => {
         volumeTimer = null;
         void apply({ soundVolume: pct / 100 });
+      }, VOLUME_DEBOUNCE_MS);
+    });
+
+    // Currency <select>: persist the chosen ISO code on change (not a checkbox).
+    const currency = container.querySelector<HTMLSelectElement>('[data-field="currency"]');
+    currency?.addEventListener("change", () => {
+      void apply({ currency: currency.value });
+    });
+
+    // Tray-background opacity slider: drives the popover's acrylic CSS tint.
+    // Debounced like the volume slider so a drag coalesces into one PUT; the
+    // label updates live. The popover re-reads the opacity on its own poll.
+    const opacity = container.querySelector<HTMLInputElement>('[data-field="popoverOpacity"]');
+    const opacityLabel = container.querySelector<HTMLElement>("[data-opacity-value]");
+    opacity?.addEventListener("input", () => {
+      const pct = Number(opacity.value);
+      if (opacityLabel) opacityLabel.textContent = `${pct}%`;
+      if (opacityTimer !== null) clearTimeout(opacityTimer);
+      opacityTimer = setTimeout(() => {
+        opacityTimer = null;
+        void apply({ popoverOpacity: pct });
       }, VOLUME_DEBOUNCE_MS);
     });
 

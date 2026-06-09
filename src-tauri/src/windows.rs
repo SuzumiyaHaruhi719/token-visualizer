@@ -1,17 +1,15 @@
-//! Window management: the dashboard window + one transparent always-on-top pet
-//! window per active session.
+//! Window management: the dashboard window + the tray "current session" popover.
 //!
 //! All windows are EXTERNAL webviews pointing at the embedded axum server
 //! (`http://127.0.0.1:<port>/…`), so the same origin serves the dashboard, the
-//! pet pages, and (if opened) a browser tab. Relative URLs in the frontend
+//! popover, and (if opened) a browser tab. Relative URLs in the frontend
 //! therefore resolve against this server automatically.
 
-use std::collections::HashSet;
-
-use cmcore::model::SessionState;
+use tauri::utils::config::WindowEffectsConfig;
+use tauri::utils::WindowEffect;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::settings::{self, Settings};
+use cmserver::settings;
 
 /// The dashboard window label.
 pub const DASHBOARD_LABEL: &str = "dashboard";
@@ -19,41 +17,136 @@ pub const DASHBOARD_LABEL: &str = "dashboard";
 /// The tray "current session" popover window label.
 pub const POPOVER_LABEL: &str = "popover";
 
-/// Prefix for per-session pet window labels (`pet-<sessionId>`).
-const PET_LABEL_PREFIX: &str = "pet-";
-
-/// Popover (tray monitor) geometry. The popover stacks one card per active
-/// session; height grows with the card count. These MUST match the popover.css
-/// sizing contract: 6px outer padding, one 84px card per session, 8px gaps.
-const POPOVER_W: f64 = 260.0;
-const POPOVER_CARD_H: f64 = 84.0;
-const POPOVER_CARD_GAP: f64 = 8.0;
-const POPOVER_PAD: f64 = 6.0;
-/// Max session cards rendered/sized at once (matches the frontend `MAX_CARDS`).
-const POPOVER_MAX_CARDS: usize = 6;
+/// Default popover (tray monitor) geometry. The popover is now RESIZABLE and
+/// size-adaptive: as it grows it progressively reveals sections (token hero →
+/// Codex session → top models → live sessions) and the hero reel's digit
+/// precision adapts to the width. These are the INITIAL/default dimensions used
+/// when the user hasn't resized it yet; the saved size (settings `popover_w/h`)
+/// takes precedence on subsequent opens.
+const POPOVER_W: f64 = 300.0;
+/// Default height shows the token hero + the Codex session (with its 5h/weekly
+/// limit bars) + today's top-3 models with no dead space (tier 3). On first
+/// paint the frontend measures its real content and calls `set_popover_height`
+/// to snap the window to an EXACT fit, so this is only the pre-measure default;
+/// growing taller reveals the live-session list (tier 4). Kept loosely in sync
+/// with the TS height breakpoints in `src/popover/popover-main.ts`.
+const POPOVER_H: f64 = 392.0;
+/// Minimum size the user can shrink the popover to (logical px). Keeps at least
+/// the token hero comfortably visible.
+const POPOVER_MIN_W: f64 = 224.0;
+const POPOVER_MIN_H: f64 = 116.0;
+/// Largest height the auto-fit / a saved size may grow the popover to (logical
+/// px). A generous ceiling so a long live-session list still fits, while a freak
+/// measurement can never produce a multi-thousand-pixel window.
+const POPOVER_MAX_H: f64 = 900.0;
 /// Gap kept between the popover and the screen's bottom-right corner (logical px).
 const POPOVER_MARGIN: f64 = 12.0;
 
-/// Logical popover height for `n` session cards, clamped to `1..=MAX`.
-/// `POPOVER_PAD + n*CARD_H + (n-1)*GAP + POPOVER_PAD`.
-fn popover_height(n: usize) -> f64 {
-    let n = n.clamp(1, POPOVER_MAX_CARDS) as f64;
-    POPOVER_PAD + n * POPOVER_CARD_H + (n - 1.0) * POPOVER_CARD_GAP + POPOVER_PAD
+/// The popover's saved size, or the default when unset. Clamped to the minimum
+/// so a corrupt/tiny saved value can never produce an unusable window.
+fn popover_size() -> (f64, f64) {
+    let s = settings::load();
+    let w = s.popover_w.unwrap_or(POPOVER_W).clamp(POPOVER_MIN_W, POPOVER_MAX_H);
+    let h = s.popover_h.unwrap_or(POPOVER_H).clamp(POPOVER_MIN_H, POPOVER_MAX_H);
+    (w, h)
 }
 
-/// Soft cap on simultaneous pet windows (design §12.5).
-const MAX_PETS: usize = 8;
+/// Clamp a frontend-measured popover height (logical px) to a safe target.
+/// Returns `None` for garbage (NaN / ±inf / non-positive) so the caller bails
+/// out without ever touching `set_size` — a runaway value like 65535 must never
+/// balloon the window + hang the compositor (fix #1). Otherwise the value is
+/// clamped to `[POPOVER_MIN_H, min(POPOVER_MAX_H, monitor_work_h)]`, where
+/// `monitor_work_h` (when known) keeps the popover from ever exceeding the
+/// height of the screen it lives on. Pure (no window) so it is unit-testable.
+fn clamp_popover_height(height: f64, monitor_work_h: Option<f64>) -> Option<f64> {
+    if !height.is_finite() || height <= 0.0 {
+        return None;
+    }
+    let ceiling = monitor_work_h
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .map(|h| h.min(POPOVER_MAX_H))
+        .unwrap_or(POPOVER_MAX_H);
+    let max_h = ceiling.max(POPOVER_MIN_H); // never invert the clamp range
+    Some(height.clamp(POPOVER_MIN_H, max_h))
+}
 
-/// Pet window geometry. Height fits bubble + Clawd stage + optional tool tag +
-/// project label without clipping (see `.pet-root` in `src/pet/pet.css`).
-const PET_W: f64 = 220.0;
-const PET_H: f64 = 270.0;
-/// Cascade offsets between successive pet windows.
-const PET_DX: f64 = 60.0;
-const PET_DY: f64 = 40.0;
-/// First pet anchor (top-left-ish of the primary screen).
-const PET_X0: f64 = 80.0;
-const PET_Y0: f64 = 80.0;
+/// Resize the popover to a frontend-measured CONTENT height (logical px),
+/// keeping the BOTTOM edge anchored so it grows UPWARD (a tray popover lives
+/// above the taskbar — growing downward would slide it off-screen / under the
+/// tray). Called over IPC from `popover-main.ts` after it measures its content,
+/// so the window fits its content exactly with ZERO dead whitespace at every
+/// tier. The height is clamped to `[POPOVER_MIN_H, min(POPOVER_MAX_H, monitor
+/// work-area height)]` and garbage values are ignored; the width is preserved
+/// (width is the user's to drag, and it drives the hero precision). The new size
+/// is persisted so the next open restores the fitted height.
+#[tauri::command]
+pub fn set_popover_height(window: tauri::Window, height: f64) {
+    let Some(win) = window.get_webview_window(POPOVER_LABEL) else {
+        return;
+    };
+    let Ok(scale) = win.scale_factor() else { return };
+
+    // Upper bound: the SMALLER of the static ceiling and the current monitor's
+    // work-area height (logical px), so the popover can never grow taller than
+    // the screen it lives on regardless of what the frontend measured.
+    let monitor_work_h = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.size().height as f64 / m.scale_factor());
+    let Some(target_h) = clamp_popover_height(height, monitor_work_h) else {
+        return; // garbage measurement — ignore (never balloon the window)
+    };
+
+    // Current geometry in LOGICAL px (the unit `set_size`/`set_position` use).
+    let Ok(outer) = win.outer_position() else { return };
+    let Ok(size) = win.inner_size() else { return };
+    let cur_w = size.width as f64 / scale;
+    let cur_h = size.height as f64 / scale;
+    let top = outer.y as f64 / scale;
+    let left = outer.x as f64 / scale;
+
+    // No-op when already within a hair of the target (avoids a resize feedback
+    // loop with the frontend ResizeObserver, which would otherwise ping-pong).
+    if (cur_h - target_h).abs() < 1.0 {
+        return;
+    }
+
+    // Anchor the bottom: new top = old bottom - new height.
+    let bottom = top + cur_h;
+    let new_top = (bottom - target_h).max(0.0);
+
+    let _ = win.set_size(tauri::LogicalSize::new(cur_w, target_h));
+    let _ = win.set_position(tauri::LogicalPosition::new(left, new_top));
+
+    // Persist the fitted height (+ position) so the next open restores it.
+    save_popover_position(&win);
+}
+
+/// Build the acrylic window-effects config for the popover. On Windows 11 the
+/// tint `color` is IGNORED (the system paints its own backdrop), so we pass
+/// `None` and let the page paint a CSS tint for the live opacity slider. The
+/// native acrylic backdrop is what avoids the old WebView2 transparent
+/// "black box": the window is no longer empty-transparent — DWM composites a
+/// blurred backdrop behind the webview.
+fn popover_effects() -> WindowEffectsConfig {
+    WindowEffectsConfig {
+        effects: vec![WindowEffect::Acrylic],
+        state: None,
+        radius: None,
+        color: None,
+    }
+}
+
+/// Apply the acrylic effect to an existing popover window (best-effort). Used
+/// after show so the backdrop is (re)asserted. If it fails (e.g. transparency
+/// disabled system-wide), the page's CSS tint falls back to fully opaque so the
+/// popover is still legible.
+fn apply_popover_effects(win: &WebviewWindow) {
+    if let Err(e) = win.set_effects(popover_effects()) {
+        eprintln!("[popover] acrylic set_effects failed (using opaque CSS fallback): {e}");
+    }
+}
 
 /// URL to LOAD a frontend page. In debug builds the page is served by the Vite
 /// dev server (so frontend edits hot-reload via `tauri dev`); in release it is
@@ -135,50 +228,95 @@ fn popover_position(app: &AppHandle, height: f64) -> (f64, f64) {
 }
 
 /// Create the popover window **hidden** at startup (like the dashboard). It is a
-/// frameless, transparent, always-on-top, non-resizable card near the primary
-/// monitor's bottom-right; revealed/hidden by [`toggle_popover`] (tray click).
+/// frameless, **transparent + acrylic**, always-on-top, **resizable** card near
+/// the primary monitor's bottom-right; revealed/hidden by [`toggle_popover`]
+/// (tray click).
+///
+/// Acrylic requires a transparent window. Unlike a *bare* transparent WebView2
+/// window (which renders an ugly opaque "black box" around the content on
+/// Windows — the reason this was previously `transparent(false)`), an acrylic
+/// window has a NATIVE DWM backdrop composited behind the webview, so the
+/// black-box artifact does not occur. The page paints a semi-transparent dark
+/// tint over the blur (its alpha is the user's "Tray background" opacity).
 pub fn create_popover(app: &AppHandle, port: u16) -> tauri::Result<()> {
     if app.get_webview_window(POPOVER_LABEL).is_some() {
         return Ok(());
     }
-    let height = popover_height(1);
-    let (x, y) = popover_position(app, height);
+    let (w, h) = popover_size();
+    let (x, y) = popover_position(app, h);
     WebviewWindowBuilder::new(
         app,
         POPOVER_LABEL,
         WebviewUrl::External(server_url(port, "/popover.html")),
     )
-    .title("Current Session")
-    .inner_size(POPOVER_W, height)
+    .title("Today")
+    .inner_size(w, h)
+    .min_inner_size(POPOVER_MIN_W, POPOVER_MIN_H)
     .position(x, y)
-    .resizable(false)
+    .resizable(true)
     .decorations(false)
-    // Opaque (NOT transparent): WebView2 transparent windows render a black box
-    // around the content on Windows. The page paints its own dark surface; the
-    // OS rounds the frameless window. shadow(true) gives it a floating feel.
-    .transparent(false)
+    // Transparent + acrylic native backdrop (see fn doc). The page paints its
+    // own dark tint OVER the blur; the OS rounds the frameless window.
+    .transparent(true)
+    .effects(popover_effects())
     .always_on_top(true)
     .skip_taskbar(true)
-    .shadow(true)
+    // No OS shadow: on an undecorated transparent Windows window it can add a
+    // 1px light border around the rounded acrylic. The blur + tint read as a
+    // floating card on their own.
+    .shadow(false)
     .visible(false) // tray-first: created hidden, shown on tray click
     .focused(false)
     .initialization_script(port_init_script(port))
     .build()?;
+    // Round the NATIVE window corners so the acrylic backdrop matches the
+    // rounded card (otherwise DWM paints a hard square block of blur behind the
+    // rounded `#popover`). Best-effort, Windows 11 only.
+    if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+        round_window_corners(&win);
+    }
     Ok(())
 }
 
+/// Apply DWM rounded corners to a window (Windows 11). No-op / harmless on
+/// other platforms + older Windows. Pairs with the acrylic backdrop so the
+/// blurred region is rounded, not a square behind the card.
+#[cfg(windows)]
+fn round_window_corners(win: &WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DWM_WINDOW_CORNER_PREFERENCE,
+    };
+    let Ok(handle) = win.hwnd() else { return };
+    let hwnd = HWND(handle.0 as _);
+    let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    // SAFETY: hwnd is a live top-level window owned by this process; the
+    // attribute + size match the DWM contract. Errors are ignored (older OS).
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn round_window_corners(_win: &WebviewWindow) {}
+
 /// Toggle the tray monitor popover: if it exists and is visible, save its
-/// position and hide it; otherwise (re)create it, size it to `session_count`
-/// active-session cards, restore the saved position (or anchor bottom-right),
-/// show + focus. Called from the tray's LEFT-click handler.
-pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
+/// position and hide it; otherwise (re)create it, restore the saved position (or
+/// anchor bottom-right), show + focus. Called from the tray's LEFT-click handler.
+pub fn toggle_popover(app: &AppHandle, port: u16) {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {
             save_popover_position(&win);
             let _ = win.hide();
             return;
         }
-        fit_popover(app, &win, session_count);
+        fit_popover(app, &win);
         let _ = win.show();
         let _ = win.set_always_on_top(true); // re-assert so it stays on top
         let _ = win.set_focus();
@@ -186,7 +324,7 @@ pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
     }
     if create_popover(app, port).is_ok() {
         if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
-            fit_popover(app, &win, session_count);
+            fit_popover(app, &win);
             let _ = win.show();
             let _ = win.set_always_on_top(true);
             let _ = win.set_focus();
@@ -194,33 +332,34 @@ pub fn toggle_popover(app: &AppHandle, port: u16, session_count: usize) {
     }
 }
 
-/// Live-resize the popover to `session_count` cards, but only while it is
-/// already visible (so a new chat starting grows it without popping it open),
-/// and only when the height actually changed (so per-tick state updates never
-/// yank a window the user may be dragging). Called from the state-poll loop.
-pub fn resize_popover_if_visible(app: &AppHandle, session_count: usize) {
-    let Some(win) = app.get_webview_window(POPOVER_LABEL) else {
-        return;
-    };
-    if !win.is_visible().unwrap_or(false) {
-        return;
-    }
-    let desired = popover_height(session_count);
-    let scale = win.scale_factor().unwrap_or(1.0);
-    if let Ok(sz) = win.inner_size() {
-        let current = sz.height as f64 / scale;
-        if (current - desired).abs() <= 1.0 {
-            return; // unchanged — leave it (and the user's drag) alone
-        }
-    }
-    fit_popover(app, &win, session_count);
+/// Restore the popover's SAVED size (or the default) and (re)position it, then
+/// re-assert the acrylic backdrop. The popover is resizable now, so we no longer
+/// force a single fixed size — we honor whatever the user last dragged it to.
+fn fit_popover(app: &AppHandle, win: &WebviewWindow) {
+    let (w, h) = popover_size();
+    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+    position_popover(app, win, h);
+    apply_popover_effects(win);
+    // Re-assert DWM rounded corners: a resize/show can reset the corner
+    // preference on some Windows builds, which would bring back the square
+    // acrylic block behind the rounded card. Cheap + idempotent.
+    round_window_corners(win);
 }
 
-/// Resize the popover to fit `session_count` cards and (re)position it.
-fn fit_popover(app: &AppHandle, win: &WebviewWindow, session_count: usize) {
-    let height = popover_height(session_count);
-    let _ = win.set_size(tauri::LogicalSize::new(POPOVER_W, height));
-    position_popover(app, win, height);
+/// Show the popover (creating it if missing) at a guaranteed-visible position.
+/// Called at startup when the monitor is enabled and when the monitor is
+/// switched ON from the settings panel (mirrors [`hide_popover`]).
+pub fn show_popover(app: &AppHandle, port: u16) {
+    if app.get_webview_window(POPOVER_LABEL).is_none() {
+        let _ = create_popover(app, port);
+    }
+    if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
+        fit_popover(app, &win);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_always_on_top(true); // re-assert so it stays on top
+        let _ = win.set_focus();
+    }
 }
 
 /// Hide the popover if it is currently visible. Saves the position first so
@@ -253,17 +392,26 @@ fn position_popover(app: &AppHandle, win: &WebviewWindow, height: f64) {
     let _ = win.set_position(tauri::LogicalPosition::new(x, y));
 }
 
-/// Persist the popover's current top-left (physical px) so the next open
-/// restores where the user dragged it.
+/// Persist the popover's current top-left (physical px) AND size (logical px) so
+/// the next open restores where the user dragged it and how big they made it.
 fn save_popover_position(win: &WebviewWindow) {
+    let base = settings::load();
+    let mut updated = base.clone();
     if let Ok(pos) = win.outer_position() {
-        let updated = Settings {
-            popover_x: Some(pos.x as f64),
-            popover_y: Some(pos.y as f64),
-            ..settings::load()
-        };
-        settings::save(&updated);
+        updated.popover_x = Some(pos.x as f64);
+        updated.popover_y = Some(pos.y as f64);
     }
+    // Inner size in LOGICAL px (matches how we set it). Clamp to the minimum so
+    // a freak value never persists an unusable size.
+    if let Ok(size) = win.inner_size() {
+        if let Ok(scale) = win.scale_factor() {
+            let w = (size.width as f64 / scale).max(POPOVER_MIN_W);
+            let h = (size.height as f64 / scale).max(POPOVER_MIN_H);
+            updated.popover_w = Some(w);
+            updated.popover_h = Some(h);
+        }
+    }
+    settings::save(&updated);
 }
 
 /// True if physical point `(x, y)` lies within any connected monitor's bounds.
@@ -277,80 +425,6 @@ fn position_on_some_monitor(app: &AppHandle, x: f64, y: f64) -> bool {
         let (mx, my) = (p.x as f64, p.y as f64);
         x >= mx && y >= my && x < mx + s.width as f64 && y < my + s.height as f64
     })
-}
-
-/// Close every open pet window (labels prefixed with [`PET_LABEL_PREFIX`]).
-/// Used when desktop pets are toggled off.
-pub fn close_all_pets(app: &AppHandle) {
-    for (label, win) in app.webview_windows() {
-        if label.strip_prefix(PET_LABEL_PREFIX).is_some() {
-            let _ = win.close();
-        }
-    }
-}
-
-/// Reconcile pet windows against the current active-session list:
-/// spawn a window for each new session, close windows whose session vanished.
-///
-/// Honors a soft cap of [`MAX_PETS`]; extra sessions are ignored (no spam).
-/// When `pets_enabled` is false, all pet windows are closed and nothing spawns.
-pub fn sync_pets(app: &AppHandle, port: u16, sessions: &[SessionState], pets_enabled: bool) {
-    if !pets_enabled {
-        close_all_pets(app);
-        return;
-    }
-    // Desired set of session ids (capped).
-    let desired: Vec<&SessionState> = sessions.iter().take(MAX_PETS).collect();
-    let desired_ids: HashSet<String> = desired.iter().map(|s| s.session_id.clone()).collect();
-
-    // 1. Close pet windows whose session disappeared.
-    for (label, win) in app.webview_windows() {
-        if let Some(sid) = label.strip_prefix(PET_LABEL_PREFIX) {
-            if !desired_ids.contains(sid) {
-                // A short delay would let the frontend play a leave animation;
-                // the frontend drives that on its own when the session drops
-                // from the SSE feed, so closing here is sufficient and simple.
-                let _ = win.close();
-            }
-        }
-    }
-
-    // 2. Spawn windows for new sessions (cascade their positions).
-    for (idx, session) in desired.iter().enumerate() {
-        let label = format!("{PET_LABEL_PREFIX}{}", session.session_id);
-        if app.get_webview_window(&label).is_some() {
-            continue; // already open
-        }
-        let x = PET_X0 + (idx as f64) * PET_DX;
-        let y = PET_Y0 + (idx as f64) * PET_DY;
-        let path = format!("/pet.html?session={}", encode_session(&session.session_id));
-        let res = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(server_url(port, &path)))
-            .title(&session.project)
-            .inner_size(PET_W, PET_H)
-            .position(x, y)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .initialization_script(port_init_script(port))
-            .build();
-        if let Err(e) = res {
-            eprintln!("[windows] failed to spawn pet {label}: {e}");
-        }
-    }
-}
-
-/// Minimal URL-encoding for a session id placed in a query string. Session ids
-/// are UUID-shaped (already URL-safe), but encode defensively anyway.
-fn encode_session(id: &str) -> String {
-    id.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            other => format!("%{:02X}", other as u32),
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -372,26 +446,58 @@ mod tests {
     }
 
     #[test]
-    fn encode_session_passes_uuid_through() {
-        assert_eq!(
-            encode_session("639e6a3d-23bb-4d25-a9f0-43ecced997f1"),
-            "639e6a3d-23bb-4d25-a9f0-43ecced997f1"
-        );
+    fn popover_defaults_exceed_minimums() {
+        // The popover is now resizable + size-adaptive. The default size must be
+        // at least the minimum the user can shrink to, and the minimum must be
+        // a sane positive floor. The default must also sit within the auto-fit
+        // ceiling so a fresh open never opens larger than the max.
+        assert!(POPOVER_W >= POPOVER_MIN_W);
+        assert!(POPOVER_H >= POPOVER_MIN_H);
+        assert!(POPOVER_MIN_W > 0.0 && POPOVER_MIN_H > 0.0);
+        assert!(POPOVER_MAX_H > POPOVER_MIN_H);
+        assert!(POPOVER_H <= POPOVER_MAX_H);
     }
 
     #[test]
-    fn encode_session_escapes_unsafe() {
-        assert_eq!(encode_session("a b/c"), "a%20b%2Fc");
+    fn clamp_popover_height_rejects_garbage() {
+        // NaN / inf / zero / negative must yield None so the command bails out
+        // and never feeds a runaway value into set_size (the 65535 freeze).
+        assert!(clamp_popover_height(f64::NAN, None).is_none());
+        assert!(clamp_popover_height(f64::INFINITY, None).is_none());
+        assert!(clamp_popover_height(f64::NEG_INFINITY, None).is_none());
+        assert!(clamp_popover_height(0.0, None).is_none());
+        assert!(clamp_popover_height(-50.0, None).is_none());
     }
 
     #[test]
-    fn popover_height_matches_card_contract() {
-        // 6 pad + 1*84 + 0 gap + 6 pad
-        assert_eq!(popover_height(1), 96.0);
-        // 6 + 3*84 + 2*8 + 6 = 280
-        assert_eq!(popover_height(3), 280.0);
-        // 0 clamps up to 1 card; > MAX clamps down to MAX (6).
-        assert_eq!(popover_height(0), popover_height(1));
-        assert_eq!(popover_height(99), popover_height(POPOVER_MAX_CARDS));
+    fn clamp_popover_height_clamps_to_min_and_max() {
+        // Below the floor → MIN; above the static ceiling (no monitor) → MAX.
+        assert_eq!(clamp_popover_height(10.0, None), Some(POPOVER_MIN_H));
+        assert_eq!(clamp_popover_height(65535.0, None), Some(POPOVER_MAX_H));
+        // A sane value passes through unchanged.
+        assert_eq!(clamp_popover_height(400.0, None), Some(400.0));
+    }
+
+    #[test]
+    fn clamp_popover_height_respects_monitor_work_area() {
+        // A short monitor caps the height below the static ceiling, so the
+        // popover can never be taller than the screen it lives on.
+        let mon = Some(600.0);
+        assert_eq!(clamp_popover_height(65535.0, mon), Some(600.0));
+        assert_eq!(clamp_popover_height(500.0, mon), Some(500.0));
+        // A garbage monitor height is ignored (falls back to the static ceiling).
+        assert_eq!(clamp_popover_height(65535.0, Some(f64::NAN)), Some(POPOVER_MAX_H));
+        assert_eq!(clamp_popover_height(65535.0, Some(0.0)), Some(POPOVER_MAX_H));
+        // A monitor shorter than the min floor can't invert the clamp range.
+        assert_eq!(clamp_popover_height(500.0, Some(50.0)), Some(POPOVER_MIN_H));
+    }
+
+    #[test]
+    fn popover_effects_request_acrylic_without_native_tint() {
+        // Acrylic is the chosen native backdrop; the tint color is left None
+        // because Windows 11 ignores it (the live opacity is a CSS layer).
+        let cfg = popover_effects();
+        assert!(cfg.effects.contains(&WindowEffect::Acrylic));
+        assert!(cfg.color.is_none());
     }
 }

@@ -1,14 +1,15 @@
 //! Discord Rich Presence: publish today's token total to the user's profile.
 //!
-//! Runs on a dedicated thread (see `lib::spawn_discord`) with its own read
-//! `Store`. The presence shows how many tokens were burned since local midnight,
-//! e.g. `🔥 123,456 tokens today`, refreshed on a slow interval.
+//! Runs on a dedicated thread (see [`spawn`]) with its own read `Store`. The
+//! presence shows how many tokens were burned since local midnight, e.g.
+//! `🔥 123,456 tokens today`, refreshed on a slow interval. Shared by the
+//! desktop app AND `cm-serve` (it has no GUI dependency).
 //!
 //! Resilience: Discord may not be running. The IPC `connect` then fails; we log
 //! once and retry on a slow cadence rather than busy-looping or crashing. Any
 //! error during an update drops the connection so the next loop reconnects.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
@@ -20,6 +21,34 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 
 /// How long to wait before retrying after a failed connect/update.
 const RETRY_INTERVAL: Duration = Duration::from_secs(45);
+
+/// Spawn the Discord Rich Presence updater on its own thread with its own
+/// `Store`. No-op unless `discord_enabled` is set AND a `discord_client_id` is
+/// present in settings.json — the integration is opt-in and never ships a
+/// hardcoded application id. Connection failures (Discord not running) are
+/// handled inside the loop with slow retries; they never crash the process.
+pub fn spawn(db_path: PathBuf) {
+    let settings = crate::settings::load();
+    let Some(client_id) = settings.discord_client_id.clone() else {
+        return; // No client id: integration disabled.
+    };
+    if !settings.discord_enabled || client_id.trim().is_empty() {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("cm-discord".into())
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(&client_id, &db_path);
+            }))
+            .is_err()
+            {
+                eprintln!("[discord] thread panicked");
+            }
+        })
+        .expect("spawn discord thread");
+}
 
 /// Run the presence loop forever. `client_id` is the Discord application id;
 /// `db_path` is reopened per query (the `Store` is not `Sync`, but this thread

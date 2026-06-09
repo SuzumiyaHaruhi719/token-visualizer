@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Backend port is injected here by the server (or via window.__CM_PORT__). -->
     <!-- <meta name="cm-port" content="0" /> -->
-    <title>Current Session</title>
+    <title>Today</title>
     <script type="module" src="/src/popover/popover-main.ts"></script>
   </head>
   <body>
-    <!-- data-tauri-drag-region makes the whole card draggable (frameless window). -->
-    <main id="popover" data-tauri-drag-region></main>
+    <!-- data-tauri-drag-region="deep" makes the WHOLE card draggable (a bare
+         value only drags when the click target is exactly this element; "deep"
+         drags from anywhere in the subtree). -->
+    <main id="popover" data-tauri-drag-region="deep"></main>
   </body>
 </html>

@@ -71,21 +71,58 @@ describe("renderLimits", () => {
 });
 
 describe("renderBySource", () => {
-  it("renders a split bar and per-source chips", () => {
+  it("renders a split bar and per-source chips for all three sources", () => {
     const root = container();
     renderBySource(root, [
-      { source: "claude", tokens: 90, costUsd: 1 },
+      { source: "claude", tokens: 80, costUsd: 1 },
       { source: "codex", tokens: 10, costUsd: 0.1 },
+      { source: "deepseek", tokens: 10, costUsd: 0.05 },
     ]);
-    expect(root.querySelectorAll(".bysource-seg").length).toBe(2);
+    // Claude / Codex / DeepSeek each get a segment + chip.
+    expect(root.querySelectorAll(".bysource-seg").length).toBe(3);
+    expect(root.querySelector(".bysource-seg.bysource-deepseek")).toBeTruthy();
     const chips = Array.from(root.querySelectorAll(".bysource-chip")).map((c) => c.textContent);
-    expect(chips.join(" ")).toMatch(/Claude 90%/);
+    expect(chips.join(" ")).toMatch(/Claude 80%/);
     expect(chips.join(" ")).toMatch(/Codex 10%/);
+    expect(chips.join(" ")).toMatch(/DeepSeek 10%/);
   });
 
   it("shows an empty state when there is no source data", () => {
     const root = container();
     renderBySource(root, []);
     expect(root.querySelector(".bysource-empty")).toBeTruthy();
+  });
+
+  it("stages the final segment widths on fresh split markup", () => {
+    // The global test-setup runs rAF synchronously, so the deferred width
+    // staging (0% -> final) settles to the final width within this call.
+    const root = container();
+    renderBySource(root, [
+      { source: "claude", tokens: 75, costUsd: 1 },
+      { source: "codex", tokens: 25, costUsd: 0.3 },
+    ]);
+    const claude = root.querySelector<HTMLElement>('.bysource-seg[data-source="claude"]');
+    const codex = root.querySelector<HTMLElement>('.bysource-seg[data-source="codex"]');
+    // jsdom canonicalizes "75.00%" -> "75%"; assert the percentage, not formatting.
+    expect(parseFloat(claude?.style.width ?? "")).toBeCloseTo(75, 2);
+    expect(parseFloat(codex?.style.width ?? "")).toBeCloseTo(25, 2);
+  });
+});
+
+describe("renderLimits gauge fills", () => {
+  it("paints Codex gauge fills at their used-percent width (no grow-from-0)", () => {
+    // The fill renders at its FINAL width directly. Animating 0->used on every
+    // refresh made the gauge look like it was constantly auto-refreshing, so the
+    // bar now paints statically at its value and only moves when the % changes.
+    const root = container();
+    renderLimits(root, mockLimits());
+    const fills = root.querySelectorAll<HTMLElement>(".limit-card-codex .limit-bar-fill");
+    expect(fills.length).toBe(2);
+    fills.forEach((fill) => {
+      // A real, non-zero width (not the old 0% start state).
+      const width = parseFloat(fill.style.width);
+      expect(width).toBeGreaterThan(0);
+      expect(width).toBeLessThanOrEqual(100);
+    });
   });
 });

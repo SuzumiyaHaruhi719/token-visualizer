@@ -1,6 +1,21 @@
+use chrono::{Local, TimeZone, Timelike};
 use core::model::{ParsedEvent, Usage};
 use core::query::{summary, summary_at};
 use core::store::Store;
+
+/// Epoch millis of LOCAL midnight for the day containing `now_ms`, computed the
+/// same way the query layer does. Tests use this to stay deterministic across
+/// machine timezones: they pin `now_ms` and compare against this, never against
+/// a hard-coded UTC constant (which would only hold in one timezone).
+fn local_midnight_ms(now_ms: i64) -> i64 {
+    let dt = Local.timestamp_millis_opt(now_ms).single().unwrap();
+    let midnight = dt.date_naive().and_hms_opt(0, 0, 0).unwrap();
+    Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .unwrap()
+        .timestamp_millis()
+}
 
 /// Day boundaries in epoch millis (UTC).
 const DAY1: i64 = 1_780_653_600_000; // 2026-06-05T10:00:00Z
@@ -275,6 +290,82 @@ fn range_today_filters_old_events() {
 }
 
 #[test]
+fn range_today_boundary_is_local_midnight() {
+    // "today" must reset at the machine's LOCAL midnight, not UTC midnight.
+    // Pin a known `now_ms`, derive the local midnight for that instant, then
+    // place one event one second BEFORE it (yesterday, excluded) and one event
+    // exactly AT it (today, included). The boundary is inclusive.
+    let s = Store::open_in_memory().unwrap();
+    // 2026-06-15T12:00:00Z — a stable mid-day instant.
+    const NOW: i64 = 1_781_524_800_000;
+    let midnight = local_midnight_ms(NOW);
+
+    s.insert_event(&mk(
+        "yesterday",
+        midnight - 1_000,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 999, ..Default::default() },
+    ))
+    .unwrap();
+    s.insert_event(&mk(
+        "at-midnight",
+        midnight,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 100, ..Default::default() },
+    ))
+    .unwrap();
+    s.insert_event(&mk(
+        "later-today",
+        midnight + 3_600_000,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 50, ..Default::default() },
+    ))
+    .unwrap();
+
+    let sum = summary_at(&s, "today", NOW).unwrap();
+    // Only the two at-or-after-local-midnight events count.
+    assert_eq!(sum.totals.messages, 2);
+    assert_eq!(sum.totals.input, 150);
+    assert_eq!(sum.range, "today");
+}
+
+#[test]
+fn timeseries_today_buckets_align_to_local_hours() {
+    // "today" hourly buckets must be labelled by the event's LOCAL hour so the
+    // chart aligns with the local-day boundary. Place an event at a known local
+    // wall-clock hour and assert the bucket carries that hour.
+    let s = Store::open_in_memory().unwrap();
+    const NOW: i64 = 1_781_524_800_000; // 2026-06-15T12:00:00Z
+    let midnight = local_midnight_ms(NOW);
+    // 09:30 local -> should land in the "09:00" local bucket.
+    let nine_thirty_local = midnight + 9 * 3_600_000 + 30 * 60_000;
+    s.insert_event(&mk(
+        "nine",
+        nine_thirty_local,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 42, ..Default::default() },
+    ))
+    .unwrap();
+
+    let sum = summary_at(&s, "today", NOW).unwrap();
+    assert_eq!(sum.timeseries.len(), 1);
+    // The bucket label's hour field equals the event's LOCAL hour (09).
+    let expected_local_hour = Local
+        .timestamp_millis_opt(nine_thirty_local)
+        .single()
+        .unwrap()
+        .hour();
+    let bucket = &sum.timeseries[0].bucket;
+    let hour_field: u32 = bucket[11..13].parse().unwrap();
+    assert_eq!(hour_field, expected_local_hour);
+    assert_eq!(sum.timeseries[0].input, 42);
+}
+
+#[test]
 fn range_7d_includes_recent_excludes_old() {
     let s = seeded_store();
     // now = 3 days after DAY2: DAY2 is within 7d, DAY1 (1 day before DAY2) too.
@@ -285,6 +376,40 @@ fn range_7d_includes_recent_excludes_old() {
     let now_far = DAY2 + 9 * 24 * 60 * 60 * 1000;
     let sum_far = summary_at(&s, "7d", now_far).unwrap();
     assert_eq!(sum_far.totals.messages, 0);
+}
+
+#[test]
+fn range_month_filters_to_calendar_month() {
+    let s = Store::open_in_memory().unwrap();
+    // In the current calendar month (2026-06-05T10:00:00Z).
+    s.insert_event(&mk(
+        "june",
+        DAY1,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 100, ..Default::default() },
+    ))
+    .unwrap();
+    // Previous calendar month (2026-05-20T00:00:00Z) — must be excluded.
+    const MAY20: i64 = 1_779_235_200_000;
+    s.insert_event(&mk(
+        "may",
+        MAY20,
+        "claude-opus-4-8",
+        "ProjA",
+        Usage { input: 999, ..Default::default() },
+    ))
+    .unwrap();
+
+    // now = 2026-06-15T12:00:00Z: the month window starts at 2026-06-01T00:00Z.
+    const NOW_JUNE15: i64 = 1_781_524_800_000;
+    let sum = summary_at(&s, "month", NOW_JUNE15).unwrap();
+    assert_eq!(
+        sum.totals.messages, 1,
+        "only the June event falls in the current calendar month"
+    );
+    assert_eq!(sum.totals.input, 100);
+    assert_eq!(sum.range, "month");
 }
 
 #[test]

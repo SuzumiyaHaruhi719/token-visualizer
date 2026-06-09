@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use core::importer::backfill;
+use core::importer::{backfill, read_new_complete_lines};
+use core::model::PetState;
+use core::state::derive_session_state;
 use core::store::Store;
 
 fn fixtures_projects() -> PathBuf {
@@ -8,6 +10,38 @@ fn fixtures_projects() -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join("projects")
+}
+
+/// End-to-end regression for the "reasoning shown as idle" bug, exercising the
+/// exact path that feeds `GET /api/sessions`: read a session jsonl tail, then
+/// derive the pet state from the parsed lines. A real Claude reasoning turn is a
+/// finalized assistant message that carries `message.usage` AND whose only
+/// content block is `thinking` — it must derive to Thinking (an ACTIVE state),
+/// never Idle. The token usage must still be captured for billing.
+#[test]
+fn real_shape_reasoning_tail_derives_thinking_not_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("projects").join("p");
+    std::fs::create_dir_all(&proj).unwrap();
+    let file = proj.join("s.jsonl");
+
+    // Captured-shape lines: a user turn, then a pure-reasoning assistant message
+    // (thinking-only content + usage), as Claude Code actually writes them.
+    let user = r#"{"type":"user","cwd":"/x/Proj","sessionId":"s","message":{"role":"user","content":"go"}}"#;
+    let reasoning = r#"{"type":"assistant","cwd":"/x/Proj","sessionId":"s","requestId":"r1","timestamp":"2026-06-08T10:00:00.000Z","message":{"model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"working through the plan...","signature":"abc"}],"usage":{"input_tokens":120,"output_tokens":340,"cache_read_input_tokens":2000}}}"#;
+    std::fs::write(&file, format!("{user}\n{reasoning}\n")).unwrap();
+
+    // Read the tail exactly like the live state poller does.
+    let read = read_new_complete_lines(&file, 0).unwrap();
+    // Billing still sees the reasoning turn's usage.
+    assert_eq!(read.events.len(), 1, "reasoning turn must remain billable");
+
+    // Empty status is the recent-jsonl fallback path. Staleness is no longer an
+    // input to derivation (the poll layer's active window handles it), so the
+    // reasoning turn's Thinking state is read directly from the tail.
+    let state = derive_session_state("", &read.lines);
+    assert_eq!(state, PetState::Thinking);
+    assert_ne!(state, PetState::Idle, "reasoning must never be Idle");
 }
 
 #[test]

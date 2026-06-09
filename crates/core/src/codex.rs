@@ -112,6 +112,216 @@ fn classify(v: &Value) -> CodexLine {
     CodexLine::Other
 }
 
+/// The live activity a Codex rollout line represents, mirroring the Claude
+/// [`crate::model::AssistantContent`] so a Codex session can be classified into
+/// the same pet states. Codex streams each step as its own line, so unlike
+/// Claude there is no usage block to look past — the `payload.type` IS the
+/// activity:
+///
+/// * `response_item` / `reasoning` — the model is reasoning -> Thinking,
+/// * `response_item` / `function_call` — a tool call (shell etc.) -> Working,
+/// * `response_item` / `function_call_output` — a tool finished,
+/// * `event_msg` / `agent_message` or an assistant `message` — visible text
+///   -> Responding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexActivity {
+    /// A `reasoning` item: the model is thinking (no visible output yet).
+    Reasoning,
+    /// A `function_call` (tool invocation), carrying the tool name + call id.
+    ToolCall { call_id: String, name: String },
+    /// A `function_call_output` (tool result) for the given call id.
+    ToolOutput { call_id: String },
+    /// The model emitted a visible reply (`agent_message` / assistant `message`).
+    Message,
+    /// A real USER prompt (`role:"user"` `input_text`, injected wrappers
+    /// excluded). The user just submitted and the model has not produced any
+    /// output yet — an ACTIVE turn (about to think), so a trailing one maps to
+    /// Thinking, never a stale Idle. Mirrors Claude's [`crate::model::LineKind`]
+    /// `UserText -> Thinking`.
+    UserPrompt,
+    /// Anything else — carries no activity signal.
+    Other,
+}
+
+/// Extract a real USER prompt from a Codex rollout line, or `None`.
+///
+/// A Codex user prompt is a `response_item` / `message` line with `role:"user"`
+/// whose content is one or more `input_text` blocks. Codex injects synthetic
+/// user messages too (the `<environment_context>` / `<user_instructions>`
+/// preamble), so injected wrappers are filtered out via
+/// [`crate::text::is_injected_user_text`]. The result is cleaned + capped to a
+/// single line. Tolerant: any parse failure / non-matching shape yields `None`.
+pub fn codex_user_text(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    user_text_from_value(&v)
+}
+
+/// [`codex_user_text`] over an already-parsed value (shared with
+/// [`classify_activity`] so a user line is parsed once per tick, not twice).
+fn user_text_from_value(v: &Value) -> Option<String> {
+    if v.get("type").and_then(Value::as_str)? != "response_item" {
+        return None;
+    }
+    let payload = v.get("payload")?;
+    if payload.get("type").and_then(Value::as_str)? != "message" {
+        return None;
+    }
+    if payload.get("role").and_then(Value::as_str)? != "user" {
+        return None;
+    }
+    let content = payload.get("content").and_then(Value::as_array)?;
+    // Concatenate the input_text blocks (a prompt may be split across several).
+    let mut raw = String::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("input_text") {
+            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                if !raw.is_empty() {
+                    raw.push(' ');
+                }
+                raw.push_str(t);
+            }
+        }
+    }
+    if raw.is_empty() || crate::text::is_injected_user_text(&raw) {
+        return None;
+    }
+    let cleaned = crate::text::clean_user_text(&raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Classify a Codex rollout line into a live [`CodexActivity`]. Tolerant: any
+/// parse failure or unrecognized shape yields [`CodexActivity::Other`].
+///
+/// This is the Codex counterpart of [`crate::parser::parse_line`]'s content
+/// classification: reasoning items count as an ACTIVE thinking signal so a Codex
+/// session that is reasoning (but not yet emitting text or tool calls) is shown
+/// as Thinking, never Idle.
+pub fn codex_activity(line: &str) -> CodexActivity {
+    let v: Value = match serde_json::from_str(line.trim()) {
+        Ok(v) => v,
+        Err(_) => return CodexActivity::Other,
+    };
+    classify_activity(&v)
+}
+
+fn classify_activity(v: &Value) -> CodexActivity {
+    let line_type = v.get("type").and_then(Value::as_str).unwrap_or_default();
+    let payload = match v.get("payload") {
+        Some(p) => p,
+        None => return CodexActivity::Other,
+    };
+    let payload_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match (line_type, payload_type) {
+        ("response_item", "reasoning") => CodexActivity::Reasoning,
+        ("response_item", "function_call") | ("response_item", "custom_tool_call") => {
+            CodexActivity::ToolCall {
+                call_id: str_field(payload, "call_id").unwrap_or_default(),
+                name: str_field(payload, "name").unwrap_or_default(),
+            }
+        }
+        ("response_item", "function_call_output")
+        | ("response_item", "custom_tool_call_output") => CodexActivity::ToolOutput {
+            call_id: str_field(payload, "call_id").unwrap_or_default(),
+        },
+        // The model's visible reply: an `agent_message` event or an assistant
+        // `message` response item (developer/user messages are NOT the model).
+        ("event_msg", "agent_message") => CodexActivity::Message,
+        ("response_item", "message")
+            if payload.get("role").and_then(Value::as_str) == Some("assistant") =>
+        {
+            CodexActivity::Message
+        }
+        // A real user prompt is an active turn (the model is about to work). A
+        // synthetic injected message (`<environment_context>` etc.) is NOT — it
+        // carries no real prompt, so `codex_user_text` returns `None` for it.
+        ("response_item", "message")
+            if payload.get("role").and_then(Value::as_str) == Some("user")
+                && user_text_from_value(v).is_some() =>
+        {
+            CodexActivity::UserPrompt
+        }
+        _ => CodexActivity::Other,
+    }
+}
+
+/// Derive a live [`crate::model::PetState`] from a window of Codex activities
+/// (oldest-first, the tail of a rollout). This is the Codex counterpart of
+/// [`crate::state::derive_from_lines`] and applies the SAME tool-pairing rule:
+///
+/// * the LAST `function_call` with no later `function_call_output` for the same
+///   `call_id` means a tool is still running -> [`PetState::Working`] (tool name),
+/// * otherwise the last meaningful activity decides:
+///   * `reasoning` -> [`PetState::Thinking`] (the model is reasoning),
+///   * a trailing `function_call_output` (the tool finished; the model is now
+///     reasoning about the result, with no end-turn marker in Codex) ->
+///     [`PetState::Thinking`],
+///   * a visible `agent_message` / assistant `message` -> [`PetState::Responding`],
+/// * nothing meaningful -> [`PetState::Idle`].
+///
+/// Pure + total: an empty window yields [`PetState::Idle`]; it never panics.
+pub fn derive_codex_state(activities: &[CodexActivity]) -> crate::model::PetState {
+    use crate::model::PetState;
+
+    if let Some(name) = last_unmatched_codex_tool(activities) {
+        let tool = if name.is_empty() { None } else { Some(name) };
+        return PetState::Working(tool);
+    }
+
+    for activity in activities.iter().rev() {
+        match activity {
+            CodexActivity::Reasoning => return PetState::Thinking,
+            CodexActivity::ToolOutput { .. } => return PetState::Thinking,
+            CodexActivity::Message => return PetState::Responding,
+            // The user just submitted and the model has not produced output yet:
+            // an active turn (about to think), never a stale Idle.
+            CodexActivity::UserPrompt => return PetState::Thinking,
+            // A matched ToolCall (the unmatched case is handled above) means the
+            // model already moved past it — keep scanning for the real tail state.
+            CodexActivity::ToolCall { .. } => continue,
+            CodexActivity::Other => continue,
+        }
+    }
+    PetState::Idle
+}
+
+/// The tool name of the last `function_call` that has no matching
+/// `function_call_output` (same `call_id`) appearing AFTER it in the window —
+/// i.e. a tool that is still running. Mirrors Claude's `last_unmatched_tool`.
+fn last_unmatched_codex_tool(activities: &[CodexActivity]) -> Option<String> {
+    for (i, activity) in activities.iter().enumerate().rev() {
+        let CodexActivity::ToolCall { call_id, name } = activity else {
+            continue;
+        };
+        // An empty call_id can never be paired (a real Codex call always carries
+        // one); treating "" == "" as a match would wrongly cancel an in-flight
+        // tool. So a call with an empty id is always considered unmatched.
+        let matched_after = !call_id.is_empty()
+            && activities[i + 1..].iter().any(|a| {
+                matches!(a, CodexActivity::ToolOutput { call_id: out_id } if out_id == call_id)
+            });
+        if !matched_after {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+/// Read a string field, returning `None` when absent or non-string.
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Parse a `token_count` payload. `info` may be `null` (early in a session); in
 /// that case both usages default to zero but any rate limits are still captured.
 fn parse_token_count(payload: &Value) -> CodexLine {
@@ -427,5 +637,227 @@ mod tests {
         assert_eq!(e.request_id, "codex:sess-9:4096");
         assert_eq!(e.source, Source::Codex);
         assert_eq!(e.model, "gpt-5.4");
+    }
+
+    // --- Codex activity classification (real captured shapes) --------------
+
+    // A reasoning item: the model is thinking. This is the Codex equivalent of a
+    // Claude thinking block and MUST count as an active thinking signal.
+    const REASONING_LINE: &str = r#"{"timestamp":"2026-06-08T10:07:33.683Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"gAAAA..."}}"#;
+
+    const FUNCTION_CALL_LINE: &str = r#"{"timestamp":"2026-06-08T10:07:36.097Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"ls\"}","call_id":"call_abc"}}"#;
+
+    const FUNCTION_OUTPUT_LINE: &str = r#"{"timestamp":"2026-06-08T10:07:41.599Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_abc","output":"Exit code: 0"}}"#;
+
+    const AGENT_MESSAGE_LINE: &str = r#"{"timestamp":"2026-06-08T10:07:34.492Z","type":"event_msg","payload":{"type":"agent_message","message":"I'll use the skill.","phase":"commentary"}}"#;
+
+    #[test]
+    fn reasoning_item_is_thinking_activity() {
+        assert_eq!(codex_activity(REASONING_LINE), CodexActivity::Reasoning);
+    }
+
+    #[test]
+    fn function_call_is_tool_activity_with_name() {
+        assert_eq!(
+            codex_activity(FUNCTION_CALL_LINE),
+            CodexActivity::ToolCall {
+                call_id: "call_abc".into(),
+                name: "shell_command".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn function_call_output_is_tool_output() {
+        assert_eq!(
+            codex_activity(FUNCTION_OUTPUT_LINE),
+            CodexActivity::ToolOutput {
+                call_id: "call_abc".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn agent_message_is_responding_activity() {
+        assert_eq!(codex_activity(AGENT_MESSAGE_LINE), CodexActivity::Message);
+    }
+
+    #[test]
+    fn real_user_message_is_user_prompt_activity() {
+        assert_eq!(codex_activity(USER_PROMPT_LINE), CodexActivity::UserPrompt);
+    }
+
+    #[test]
+    fn injected_user_message_is_not_an_activity() {
+        // A synthetic <environment_context> user message carries no real prompt,
+        // so it is NOT an active turn.
+        assert_eq!(codex_activity(ENV_CONTEXT_LINE), CodexActivity::Other);
+    }
+
+    // --- Codex user-prompt extraction (real captured shapes) ---------------
+
+    const USER_PROMPT_LINE: &str = r#"{"timestamp":"2026-06-09T06:45:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Audit an UNCOMMITTED change in CorePilot"}]}}"#;
+
+    const ENV_CONTEXT_LINE: &str = r#"{"timestamp":"2026-06-09T06:45:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\x</cwd>\n</environment_context>"}]}}"#;
+
+    const DEVELOPER_LINE: &str = r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions> ..."}]}}"#;
+
+    #[test]
+    fn extracts_real_user_prompt() {
+        assert_eq!(
+            codex_user_text(USER_PROMPT_LINE).as_deref(),
+            Some("Audit an UNCOMMITTED change in CorePilot")
+        );
+    }
+
+    #[test]
+    fn skips_injected_environment_context() {
+        assert_eq!(codex_user_text(ENV_CONTEXT_LINE), None);
+    }
+
+    #[test]
+    fn skips_developer_role() {
+        assert_eq!(codex_user_text(DEVELOPER_LINE), None);
+    }
+
+    #[test]
+    fn assistant_message_is_not_a_user_prompt() {
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}"#;
+        assert_eq!(codex_user_text(line), None);
+    }
+
+    #[test]
+    fn user_text_never_panics_on_garbage() {
+        for line in ["", "{not json", "{}", r#"{"type":"x"}"#, r#"{"payload":null}"#] {
+            assert_eq!(codex_user_text(line), None);
+        }
+    }
+
+    #[test]
+    fn developer_message_is_not_a_model_reply() {
+        // A `message` response item with a non-assistant role is input, not the
+        // model's reply, so it carries no activity.
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"x"}]}}"#;
+        assert_eq!(codex_activity(line), CodexActivity::Other);
+    }
+
+    #[test]
+    fn token_count_carries_no_activity() {
+        assert_eq!(codex_activity(TOKEN_COUNT_LINE), CodexActivity::Other);
+    }
+
+    #[test]
+    fn codex_activity_never_panics_on_garbage() {
+        for line in ["", "{not json", "{}", r#"{"type":"x"}"#, r#"{"payload":null}"#] {
+            assert_eq!(codex_activity(line), CodexActivity::Other);
+        }
+    }
+
+    // --- Codex live PetState derivation (Q1) --------------------------------
+
+    use crate::model::PetState;
+
+    fn call(id: &str, name: &str) -> CodexActivity {
+        CodexActivity::ToolCall {
+            call_id: id.into(),
+            name: name.into(),
+        }
+    }
+    fn output(id: &str) -> CodexActivity {
+        CodexActivity::ToolOutput { call_id: id.into() }
+    }
+
+    #[test]
+    fn empty_window_is_idle() {
+        assert_eq!(derive_codex_state(&[]), PetState::Idle);
+    }
+
+    #[test]
+    fn trailing_reasoning_is_thinking() {
+        assert_eq!(
+            derive_codex_state(&[CodexActivity::Message, CodexActivity::Reasoning]),
+            PetState::Thinking
+        );
+    }
+
+    #[test]
+    fn unmatched_function_call_is_working_with_name() {
+        // A reasoning then a shell call with no output yet -> still working.
+        let acts = vec![CodexActivity::Reasoning, call("c1", "shell_command")];
+        assert_eq!(
+            derive_codex_state(&acts),
+            PetState::Working(Some("shell_command".into()))
+        );
+    }
+
+    #[test]
+    fn matched_function_call_then_output_is_thinking() {
+        // Tool ran and finished; with no end-turn marker the model is digesting
+        // the result -> Thinking (the live state during the reasoning gap).
+        let acts = vec![call("c1", "shell_command"), output("c1")];
+        assert_eq!(derive_codex_state(&acts), PetState::Thinking);
+    }
+
+    #[test]
+    fn last_unmatched_call_wins_over_completed_one() {
+        let acts = vec![
+            call("c1", "read_file"),
+            output("c1"),
+            call("c2", "apply_patch"),
+        ];
+        assert_eq!(
+            derive_codex_state(&acts),
+            PetState::Working(Some("apply_patch".into()))
+        );
+    }
+
+    #[test]
+    fn trailing_message_is_responding() {
+        let acts = vec![call("c1", "shell"), output("c1"), CodexActivity::Message];
+        assert_eq!(derive_codex_state(&acts), PetState::Responding);
+    }
+
+    #[test]
+    fn trailing_user_prompt_is_thinking_not_idle() {
+        // A fresh turn: the user just submitted and the model has not produced
+        // any output yet. This must read Thinking (active), never Idle.
+        let acts = vec![CodexActivity::Message, CodexActivity::UserPrompt];
+        let st = derive_codex_state(&acts);
+        assert_eq!(st, PetState::Thinking);
+        assert_ne!(st, PetState::Idle, "a fresh user prompt is an active turn");
+    }
+
+    #[test]
+    fn tool_call_without_name_is_working_none() {
+        let acts = vec![call("c1", "")];
+        assert_eq!(derive_codex_state(&acts), PetState::Working(None));
+    }
+
+    #[test]
+    fn output_before_its_call_does_not_match_future_call() {
+        // An output whose call appears AFTER it must not match that later call.
+        let acts = vec![output("c1"), call("c1", "shell")];
+        assert_eq!(
+            derive_codex_state(&acts),
+            PetState::Working(Some("shell".into()))
+        );
+    }
+
+    #[test]
+    fn only_other_activities_is_idle() {
+        let acts = vec![CodexActivity::Other, CodexActivity::Other];
+        assert_eq!(derive_codex_state(&acts), PetState::Idle);
+    }
+
+    #[test]
+    fn empty_call_id_output_does_not_cancel_empty_call_id_call() {
+        // A call + an output both with empty call_id must NOT pair (real Codex
+        // always carries a call_id; "" == "" would wrongly cancel the tool).
+        let acts = vec![call("", "shell"), output("")];
+        assert_eq!(
+            derive_codex_state(&acts),
+            PetState::Working(Some("shell".into())),
+            "empty call_id must be treated as unmatched -> still Working"
+        );
     }
 }

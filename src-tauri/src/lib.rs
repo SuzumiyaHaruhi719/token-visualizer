@@ -1,31 +1,27 @@
 //! Claude Monitor — Tauri desktop shell.
 //!
-//! Wires the pure-logic `cmcore` crate into a running desktop app:
-//! * an embedded axum server (`server`) on `127.0.0.1:<auto port>` that serves
-//!   the built frontend + JSON API + SSE,
-//! * a backfill pass + live `notify` watcher that keep the SQLite store current,
-//! * a state-poll loop (`state_poll`) that derives live per-session pet state,
-//! * the desktop surface: a dashboard window, per-session pet windows
-//!   (`windows`), and a system tray (`tray`).
+//! Thin GUI layer over the shared [`cmserver`] core runtime. The heavy lifting
+//! (embedded axum server, SQLite ingestion + watchers, FX, settings, the live
+//! session-poll publish path, Discord) lives in `cmserver::run_core`; this crate
+//! adds only the desktop surface:
+//! * a dashboard window + tray popover (`windows`) and a system tray (`tray`),
+//! * session-end notifications (`notify`),
+//! * the desktop side-effects of the state-poll loop, supplied as
+//!   [`state_poll::DesktopHooks`].
+//!
+//! The exact same `cmserver::run_core` powers the headless `cm-serve` binary
+//! (browser mode), so the dashboard behaves identically in a browser tab — only
+//! the tray/popover/notifications (this crate) are desktop-only.
 //!
 //! Read-only invariant: nothing under `~/.claude` is ever opened for writing.
 //! All persistence (db, pricing, port file) lives under the app data dir.
 
-mod discord;
 mod notify;
-mod server;
-mod settings;
 mod state_poll;
 mod tray;
-mod util;
 mod windows;
 
-use std::path::PathBuf;
-
-use cmcore::pricing::PriceTable;
-use cmcore::store::Store;
-use cmcore::watcher::{self, WatchEvent};
-use server::{AppState, RuntimeSettings, SseEvent};
+use cmserver::{run_core, RunOpts};
 use tauri::Manager;
 
 /// Configure the embedded WebView2 + this process to bypass any system proxy for
@@ -40,24 +36,6 @@ fn configure_proxy_bypass() {
     std::env::set_var("no_proxy", "127.0.0.1,localhost");
 }
 
-/// Load the editable price table from `pricing.json`, falling back to the seed.
-fn load_prices() -> PriceTable {
-    cmcore::paths::default_pricing_path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| PriceTable::from_json(&s).ok())
-        .unwrap_or_else(PriceTable::seeded)
-}
-
-/// Persist the chosen server port to `<app_data_dir>/server-port.txt` so the
-/// smoke test (and any external tooling) can discover the ephemeral port.
-fn write_port_file(port: u16) {
-    if let Ok(dir) = cmcore::paths::app_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("server-port.txt"), port.to_string());
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_proxy_bypass();
@@ -65,328 +43,68 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        // Frontend-driven auto-fit: the popover measures its content and asks the
+        // shell to snap the window to that exact height (no dead whitespace).
+        .invoke_handler(tauri::generate_handler![windows::set_popover_height])
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // --- shared state -------------------------------------------------
-            let db_path: PathBuf = cmcore::paths::default_db_path()?;
-            let prices = load_prices();
-
-            // Persisted on/off toggles + chime config shared with the relevant
-            // subsystems (state-poll/tray for pets, tray for the monitor popover,
-            // state-poll for the chime) AND the settings panel via `/api/settings`.
-            // Volume is stored as a PERCENT (0..=100) so it fits an AtomicU32.
-            let saved_settings = settings::load();
-            let pets_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                saved_settings.pets_enabled,
-            ));
-            let monitor_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                saved_settings.monitor_enabled,
-            ));
-            let sound_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                saved_settings.sound_enabled,
-            ));
-            let sound_volume = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
-                (saved_settings.sound_volume.clamp(0.0, 1.0) * 100.0).round() as u32,
-            ));
-            let runtime = RuntimeSettings {
-                pets_enabled: pets_enabled.clone(),
-                monitor_enabled: monitor_enabled.clone(),
-                sound_enabled: sound_enabled.clone(),
-                sound_volume: sound_volume.clone(),
-            };
-
-            let state = AppState::new(db_path.clone(), prices, runtime);
-
-            // Live active-session count: written by the state-poll loop, read by
-            // the tray click to size the monitor popover to the session count.
-            let session_count =
-                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
             // --- resolve the built frontend dir ------------------------------
+            // Desktop resolution is independent of the `CM_DIST` env override
+            // (that is a browser-mode/`cm-serve` affordance), so the app behaves
+            // exactly as before. The Tauri resource dir is offered as a
+            // candidate for the bundled layout.
             let resource_dir = app.path().resource_dir().ok();
-            let dist_dir = server::resolve_dist_dir(resource_dir.as_deref()).ok_or_else(|| {
-                anyhow::anyhow!("could not locate the built frontend `dist/` (run `npm run build`)")
-            })?;
+            let dist_dir = cmserver::server::resolve_dist_dir_with_resource(resource_dir.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not locate the built frontend `dist/` (run `npm run build`)"
+                    )
+                })?;
 
-            // --- bind + serve the axum server --------------------------------
-            // Bind synchronously to learn the port; the serve loop is spawned
-            // onto the async runtime inside `bind`.
-            let port =
-                tauri::async_runtime::block_on(server::bind(state.clone(), dist_dir.clone()))?;
-            write_port_file(port);
+            // --- shared core runtime (server + ingestion + fx + discord) -----
+            // Port 0 = OS-chosen ephemeral port, exactly as the app used before.
+            // `run_core` binds the server, writes `server-port.txt`, and spawns
+            // the backfills + watchers + fx + (opt-in) Discord.
+            //
+            // `run_core` is async (it `.await`s the bind and `tokio::spawn`s the
+            // serve loop), so it must be driven inside a Tokio runtime. The Tauri
+            // `setup` closure is NOT itself in one, so we drive it on Tauri's
+            // PERSISTENT global async runtime via `block_on`; the spawned axum
+            // task then lives on that runtime for the app's lifetime (the same
+            // contract the app relied on before this refactor).
+            let run = tauri::async_runtime::block_on(run_core(RunOpts {
+                dist_dir,
+                port: 0,
+                enable_discord: true,
+            }))?;
+            let port = run.port;
+            let state = run.state;
 
-            // --- backfill (own thread, own Store) ----------------------------
-            spawn_backfill(state.clone());
-            spawn_codex_backfill(state.clone());
-
-            // --- live watcher + bridge to the SSE bus ------------------------
-            spawn_watcher(state.clone(), db_path.clone());
-            spawn_codex_watcher(state.clone(), db_path.clone());
-
-            // --- state-poll loop (live pet state + windows + tray) -----------
-            {
-                let state = state.clone();
-                let app_for_poll = handle.clone();
-                let pets_enabled_for_poll = pets_enabled.clone();
-                let session_count_for_poll = session_count.clone();
-                let sound_enabled_for_poll = sound_enabled.clone();
-                let sound_volume_for_poll = sound_volume.clone();
-                std::thread::Builder::new()
-                    .name("cm-state-poll".into())
-                    .spawn(move || {
-                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            state_poll::run(
-                                state,
-                                app_for_poll,
-                                port,
-                                pets_enabled_for_poll,
-                                session_count_for_poll,
-                                sound_enabled_for_poll,
-                                sound_volume_for_poll,
-                            );
-                        }))
-                        .is_err()
-                        {
-                            eprintln!("[state-poll] thread panicked");
-                        }
-                    })
-                    .expect("spawn state-poll thread");
-            }
-
-            // --- Discord Rich Presence (own thread, own Store) ---------------
-            // Off unless explicitly enabled with a client id in settings.json.
-            spawn_discord(state.clone());
+            // --- state-poll loop with DESKTOP side effects -------------------
+            // The publish path (sessions/usage -> AppState + SSE) lives in
+            // `cmserver`; here we supply the tray tooltip + popover toggle +
+            // notification hooks, which capture the AppHandle.
+            let monitor_enabled = state.runtime.monitor_enabled.clone();
+            cmserver::spawn_state_poll(
+                state.clone(),
+                state_poll::DesktopHooks::new(handle.clone(), port),
+            );
 
             // --- desktop surface ---------------------------------------------
             windows::create_dashboard(&handle, port)?;
-            // Tray current-session popover: created hidden, toggled on tray click.
+            // Tray "today" popover: created hidden. Reveal it now when the monitor
+            // is enabled so turning the monitor on actually shows it (the state-
+            // poll loop also shows/hides it as the toggle flips); otherwise it
+            // waits for a tray click.
             windows::create_popover(&handle, port)?;
-            tray::build(
-                &handle,
-                port,
-                monitor_enabled.clone(),
-                session_count.clone(),
-            )?;
+            if monitor_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                windows::show_popover(&handle, port);
+            }
+            tray::build(&handle, port, monitor_enabled.clone())?;
 
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Spawn the one-shot backfill on its own thread with its own `Store`.
-/// Progress is mirrored into `AppState.import` and broadcast as `import`.
-fn spawn_backfill(state: AppState) {
-    std::thread::Builder::new()
-        .name("cm-backfill".into())
-        .spawn(move || {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let projects = match cmcore::paths::projects_dir() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("[backfill] no projects dir: {e}");
-                        return;
-                    }
-                };
-                let store = match Store::open(&state.db_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[backfill] open store: {e}");
-                        return;
-                    }
-                };
-                let tx = state.tx.clone();
-                let import = state.import.clone();
-                let res = cmcore::importer::backfill(&projects, &store, |done, total| {
-                    {
-                        let mut g = import.blocking_write();
-                        *g = (done, total);
-                    }
-                    let _ = tx.send(SseEvent::Import { done, total });
-                });
-                if let Err(e) = res {
-                    eprintln!("[backfill] error: {e:#}");
-                }
-            }))
-            .is_err()
-            {
-                eprintln!("[backfill] thread panicked");
-            }
-        })
-        .expect("spawn backfill thread");
-}
-
-/// Spawn the one-shot Codex backfill on its own thread + Store. Read-only over
-/// `~/.codex/sessions`. Does not touch the `import` progress bar (that tracks
-/// the Claude backfill); failures are logged, never fatal.
-fn spawn_codex_backfill(state: AppState) {
-    std::thread::Builder::new()
-        .name("cm-codex-backfill".into())
-        .spawn(move || {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let dir = match cmcore::paths::codex_sessions_dir() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("[codex-backfill] no sessions dir: {e}");
-                        return;
-                    }
-                };
-                if !dir.is_dir() {
-                    return; // Codex not installed on this machine.
-                }
-                let store = match Store::open(&state.db_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[codex-backfill] open store: {e}");
-                        return;
-                    }
-                };
-                if let Err(e) = cmcore::importer::backfill_codex(&dir, &store, |_, _| {}) {
-                    eprintln!("[codex-backfill] error: {e:#}");
-                }
-            }))
-            .is_err()
-            {
-                eprintln!("[codex-backfill] thread panicked");
-            }
-        })
-        .expect("spawn codex-backfill thread");
-}
-
-/// Start the live Codex `notify` watcher over `~/.codex/sessions` plus a bridge
-/// thread that refreshes `current` on new events. Mirrors [`spawn_watcher`].
-fn spawn_codex_watcher(state: AppState, db_path: PathBuf) {
-    let dir = match cmcore::paths::codex_sessions_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[codex-watcher] no sessions dir: {e}");
-            return;
-        }
-    };
-    if !dir.is_dir() {
-        return; // Codex not installed: nothing to watch.
-    }
-
-    let (tx_watch, rx_watch) = std::sync::mpsc::channel::<WatchEvent>();
-    let watch_store = match Store::open(&db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[codex-watcher] open store: {e}");
-            return;
-        }
-    };
-    let handle = match watcher::watch_codex(&dir, watch_store, tx_watch) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[codex-watcher] failed to start: {e}");
-            return;
-        }
-    };
-
-    std::thread::Builder::new()
-        .name("cm-codex-watch-bridge".into())
-        .spawn(move || {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_watch_bridge(state, db_path, rx_watch, handle);
-            }))
-            .is_err()
-            {
-                eprintln!("[codex-watcher] bridge thread panicked");
-            }
-        })
-        .expect("spawn codex-watch-bridge thread");
-}
-
-/// Start the live `notify` watcher (which owns its own moved `Store`) and a
-/// bridge thread that turns each [`WatchEvent`] into a `usage` broadcast.
-fn spawn_watcher(state: AppState, db_path: PathBuf) {
-    let projects = match cmcore::paths::projects_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[watcher] no projects dir: {e}");
-            return;
-        }
-    };
-
-    // Channel from the watcher thread to our bridge.
-    let (tx_watch, rx_watch) = std::sync::mpsc::channel::<WatchEvent>();
-
-    // The watcher needs its own Store (moved in).
-    let watch_store = match Store::open(&db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[watcher] open store: {e}");
-            return;
-        }
-    };
-
-    let handle = match watcher::watch(&projects, watch_store, tx_watch) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[watcher] failed to start: {e}");
-            return;
-        }
-    };
-
-    // Bridge thread: keep the WatchHandle alive + recompute `current` on events.
-    std::thread::Builder::new()
-        .name("cm-watch-bridge".into())
-        .spawn(move || {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_watch_bridge(state, db_path, rx_watch, handle);
-            }))
-            .is_err()
-            {
-                eprintln!("[watcher] bridge thread panicked");
-            }
-        })
-        .expect("spawn watch-bridge thread");
-}
-
-/// Drain watcher events and broadcast a refreshed `usage` snapshot. Holds the
-/// [`watcher::WatchHandle`] for the app's lifetime so the watcher stays alive.
-fn run_watch_bridge(
-    state: AppState,
-    db_path: PathBuf,
-    rx: std::sync::mpsc::Receiver<WatchEvent>,
-    _handle: watcher::WatchHandle,
-) {
-    for _ev in rx.iter() {
-        // The watcher already inserted the events into the store; we just need
-        // to refresh the dashboard's notion of "current" from the store.
-        if let Ok(store) = Store::open(&db_path) {
-            if let Ok(Some(c)) = cmcore::query::current(&store) {
-                let _ = state.tx.send(SseEvent::Usage(Some(c)));
-            }
-        }
-    }
-}
-
-/// Spawn the Discord Rich Presence updater on its own thread with its own
-/// `Store`. No-op unless `discord_enabled` is set AND a `discord_client_id` is
-/// present in settings.json — the integration is opt-in and never ships a
-/// hardcoded application id. Connection failures (Discord not running) are
-/// handled inside the loop with slow retries; they never crash the app.
-fn spawn_discord(state: AppState) {
-    let settings = settings::load();
-    let Some(client_id) = settings.discord_client_id.clone() else {
-        return; // No client id: integration disabled.
-    };
-    if !settings.discord_enabled || client_id.trim().is_empty() {
-        return;
-    }
-
-    std::thread::Builder::new()
-        .name("cm-discord".into())
-        .spawn(move || {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                discord::run(&client_id, &state.db_path);
-            }))
-            .is_err()
-            {
-                eprintln!("[discord] thread panicked");
-            }
-        })
-        .expect("spawn discord thread");
 }

@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Which tool a usage event originated from. Serialized lowercase
-/// (`"claude"` / `"codex"`) for the frontend and the `events.source` column.
+/// (`"claude"` / `"codex"` / `"deepseek"`) for the frontend and the
+/// `events.source` column.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
@@ -17,6 +18,10 @@ pub enum Source {
     Claude,
     /// OpenAI Codex CLI (`~/.codex/sessions/**/rollout-*.jsonl`).
     Codex,
+    /// Reasonix (a DeepSeek desktop client, `~/.reasonix/usage.jsonl` +
+    /// `~/.reasonix/sessions/`). Serialized `"deepseek"` so the by-source UI
+    /// labels it by the model provider the user sees.
+    DeepSeek,
 }
 
 impl Source {
@@ -25,6 +30,7 @@ impl Source {
         match self {
             Source::Claude => "claude",
             Source::Codex => "codex",
+            Source::DeepSeek => "deepseek",
         }
     }
 
@@ -32,6 +38,7 @@ impl Source {
     pub fn from_str_or_claude(s: &str) -> Self {
         match s {
             "codex" => Source::Codex,
+            "deepseek" => Source::DeepSeek,
             _ => Source::Claude,
         }
     }
@@ -79,21 +86,58 @@ pub struct ParsedEvent {
     pub source: Source,
 }
 
+/// The dominant content of an assistant message that carried `message.usage`.
+///
+/// Real Claude Code jsonl attaches `message.usage` to EVERY assistant message —
+/// including pure-reasoning and tool-call turns — so the usage block alone cannot
+/// tell us what the model was actually doing. This captures the content block
+/// that drives the live state: reasoning, a tool call, or visible text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistantContent {
+    /// The message body is a `thinking` block (extended reasoning) only.
+    Thinking,
+    /// The message issued a `tool_use` call (the model is about to run a tool).
+    Tool { id: String, name: String },
+    /// The message emitted visible `text` (or anything else) — responding.
+    Text,
+}
+
 /// What a single jsonl line represents (only the variants we care about).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineKind {
-    /// Assistant message that carried `message.usage`.
-    Assistant(ParsedEvent),
-    /// Assistant `thinking` content block.
+    /// Assistant message that carried `message.usage`. `content` records what the
+    /// model was doing (reasoning / tool call / text) for live-state derivation;
+    /// the [`ParsedEvent`] carries the token usage for billing.
+    Assistant {
+        event: ParsedEvent,
+        content: AssistantContent,
+    },
+    /// Assistant `thinking` content block with no usage (streaming reasoning).
     Thinking,
-    /// A tool call was started.
+    /// A tool call was started (a `tool_use` block with no usage).
     ToolUse { id: String, name: String },
     /// A tool finished (`tool_result` block).
     ToolResult { tool_use_id: String },
     /// `stop_reason == "end_turn"` with no tool_use.
     EndTurn,
-    /// Anything else (user/system/summary/sidechain) — ignored for usage.
+    /// A real USER prompt line (`message.role == "user"` with text content that
+    /// is NOT a tool result and NOT an injected wrapper). Carries the cleaned,
+    /// capped prompt text so the live-state layer can surface the last one. Not
+    /// billable; ignored by usage aggregation like every non-assistant kind.
+    UserText(String),
+    /// Anything else (system/summary/sidechain/tool-result-only user) — ignored.
     Other,
+}
+
+impl LineKind {
+    /// The billable [`ParsedEvent`] this line carries, if any. Only usage-bearing
+    /// assistant lines produce an event; all other kinds return `None`.
+    pub fn event(&self) -> Option<&ParsedEvent> {
+        match self {
+            LineKind::Assistant { event, .. } => Some(event),
+            _ => None,
+        }
+    }
 }
 
 /// The desktop-pet animation state for a session.
@@ -109,8 +153,8 @@ pub enum PetState {
     Sleeping,
 }
 
-/// Live state of one active session — drives both the dashboard "current"
-/// strip and the per-session pet windows.
+/// Live state of one active session — drives the dashboard "current" session
+/// strip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
@@ -120,7 +164,25 @@ pub struct SessionState {
     pub state: PetState,
     /// Running token total for this session.
     pub tokens: i64,
+    /// Epoch millis of this session's LAST ACTIVITY (newest jsonl/rollout line
+    /// timestamp), NOT the poll time. The frontend renders staleness ("Nm ago")
+    /// from it, so a live-but-quiet session (mid-reasoning, not writing every
+    /// second) keeps its real state while this value ages — that freshness is
+    /// what replaces the old snap-to-`Idle` behavior.
     pub updated_at: i64,
+    /// The most recent USER message text for this session (a real prompt, not a
+    /// tool result or injected wrapper), trimmed to a single line and capped.
+    /// Empty when none was found in the scanned tail. The frontend shows this in
+    /// place of the project name. `#[serde(default)]` so older payloads / test
+    /// fixtures without the field still deserialize.
+    #[serde(default)]
+    pub last_user_message: String,
+    /// Which agent this live session belongs to (Claude Code vs Codex CLI vs
+    /// Reasonix/DeepSeek), so the UI can tell them apart. Defaults to
+    /// [`Source::Claude`] so existing callers / deserialized payloads without
+    /// the field keep working.
+    #[serde(default)]
+    pub source: Source,
 }
 
 /// Aggregate totals across a time range.
@@ -157,7 +219,7 @@ pub struct ProjectBreakdown {
     pub tokens: i64,
 }
 
-/// Per-source breakdown row (Claude vs Codex).
+/// Per-source breakdown row (Claude vs Codex vs DeepSeek).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceBreakdown {
@@ -186,7 +248,7 @@ pub struct Summary {
     pub totals: Totals,
     pub by_model: Vec<ModelBreakdown>,
     pub by_project: Vec<ProjectBreakdown>,
-    /// Per-source (Claude vs Codex) token + cost breakdown.
+    /// Per-source (Claude vs Codex vs DeepSeek) token + cost breakdown.
     pub by_source: Vec<SourceBreakdown>,
     pub timeseries: Vec<TimeseriesBucket>,
 }

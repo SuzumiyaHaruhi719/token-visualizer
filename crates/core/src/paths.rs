@@ -41,6 +41,24 @@ pub fn codex_sessions_dir() -> Result<PathBuf> {
     Ok(codex_home()?.join("sessions"))
 }
 
+/// `~/.reasonix` — the root of the Reasonix (DeepSeek) client's data. Read-only.
+pub fn reasonix_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("could not resolve home directory"))?;
+    Ok(home.join(".reasonix"))
+}
+
+/// `~/.reasonix/usage.jsonl` — one JSON line per turn (the token + cost source
+/// we bill on). Read-only.
+pub fn reasonix_usage_path() -> Result<PathBuf> {
+    Ok(reasonix_dir()?.join("usage.jsonl"))
+}
+
+/// `~/.reasonix/sessions` — per-session conversation (`<name>.jsonl`), event
+/// (`<name>.events.jsonl`), and metadata (`<name>.meta.json`) files. Read-only.
+pub fn reasonix_sessions_dir() -> Result<PathBuf> {
+    Ok(reasonix_dir()?.join("sessions"))
+}
+
 /// The app's own writable data directory, e.g. `%APPDATA%/claude-monitor`.
 ///
 /// Falls back to the home dir if the platform data dir is unavailable, but

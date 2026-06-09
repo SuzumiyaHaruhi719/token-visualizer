@@ -1,9 +1,10 @@
 //! Embedded axum server: serves the built frontend (`dist/`) + JSON API + SSE.
 //!
-//! ONE server on `127.0.0.1:<auto port>` feeds everything: the Tauri webviews
-//! (dashboard + pet windows are EXTERNAL webviews pointing at this origin) and,
-//! if the user opens it, a real browser tab. Because every client shares this
-//! origin, no CORS is needed and the frontend can use relative URLs.
+//! ONE server on `127.0.0.1:<port>` feeds everything: in the desktop app the
+//! Tauri webviews (dashboard + tray popover are EXTERNAL webviews pointing at
+//! this origin); in browser mode (`cm-serve`) a real browser tab. Because every
+//! client shares this origin, no CORS is needed and the frontend uses relative
+//! URLs.
 //!
 //! Threading: the server NEVER holds a `Store` (rusqlite `Connection` is not
 //! `Sync`). It opens a short-lived read connection per request via the stored
@@ -23,6 +24,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use cmcore::model::{SessionState, Summary};
+use crate::fx::{self, SharedFx};
 use crate::settings;
 use cmcore::pricing::PriceTable;
 use cmcore::query;
@@ -75,7 +77,7 @@ pub struct AppState {
     pub db_path: PathBuf,
     /// Editable price table (also persisted to `pricing.json`).
     pub prices: Arc<RwLock<PriceTable>>,
-    /// All currently-active sessions (drives `/api/sessions` + pet windows).
+    /// All currently-active sessions (drives `/api/sessions` + the session strip).
     pub sessions: Arc<RwLock<Vec<SessionState>>>,
     /// Most-recently-active session (drives `/api/current` + tray + KPI strip).
     pub current: Arc<RwLock<Option<SessionState>>>,
@@ -86,6 +88,9 @@ pub struct AppState {
     /// Live runtime toggles shared with the tray + state-poll loop, exposed via
     /// `/api/settings`. The settings panel reads/writes these.
     pub runtime: RuntimeSettings,
+    /// Billing-currency FX cache (USD-based rates), served at `/api/fx`. Seeded
+    /// from `fx.json` and refreshed once/day by the `fx` thread (see fx.rs).
+    pub fx: SharedFx,
 }
 
 /// The interactive runtime settings shared between the embedded server (the
@@ -94,8 +99,8 @@ pub struct AppState {
 /// restart. Volume is stored as a PERCENT (`0..=100`).
 #[derive(Clone)]
 pub struct RuntimeSettings {
-    pub pets_enabled: Arc<AtomicBool>,
     pub monitor_enabled: Arc<AtomicBool>,
+    pub notifications_enabled: Arc<AtomicBool>,
     pub sound_enabled: Arc<AtomicBool>,
     pub sound_volume: Arc<AtomicU32>,
 }
@@ -105,8 +110,8 @@ impl Default for RuntimeSettings {
     /// and any caller that does not seed from `settings.json`.
     fn default() -> Self {
         Self {
-            pets_enabled: Arc::new(AtomicBool::new(true)),
             monitor_enabled: Arc::new(AtomicBool::new(true)),
+            notifications_enabled: Arc::new(AtomicBool::new(true)),
             sound_enabled: Arc::new(AtomicBool::new(true)),
             sound_volume: Arc::new(AtomicU32::new(80)),
         }
@@ -126,6 +131,8 @@ impl AppState {
             import: Arc::new(RwLock::new((0, 0))),
             tx,
             runtime,
+            // Empty until seeded from `fx.json` + refreshed by the fx thread.
+            fx: Arc::new(RwLock::new(fx::FxCache::default())),
         }
     }
 
@@ -149,7 +156,7 @@ fn default_range() -> String {
 
 /// Build the axum router for the given state + resolved static `dist` dir.
 pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
-    // ServeDir handles `/` -> index.html and `/pet.html`, `/assets/*`, etc.
+    // ServeDir handles `/` -> index.html and `/popover.html`, `/assets/*`, etc.
     let static_files = ServeDir::new(&dist_dir).append_index_html_on_directories(true);
 
     Router::new()
@@ -158,6 +165,7 @@ pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
         .route("/api/sessions", get(get_sessions))
         .route("/api/pricing", get(get_pricing).put(put_pricing))
         .route("/api/limits", get(get_limits))
+        .route("/api/fx", get(get_fx))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/events", get(sse_handler))
         .fallback_service(static_files)
@@ -167,20 +175,21 @@ pub fn build_router(state: AppState, dist_dir: PathBuf) -> Router {
         .with_state(state)
 }
 
-/// Bind `127.0.0.1:0`, spawn the server loop, and return the chosen port.
+/// Bind `127.0.0.1:port`, spawn the server loop, and return the chosen port.
 ///
-/// The port is returned immediately so bootstrap can build window URLs and
-/// write `server-port.txt`; the server itself runs forever on the async
-/// runtime. Must be called from within a Tokio runtime context (it is, via the
-/// Tauri async runtime).
-pub async fn bind(state: AppState, dist_dir: PathBuf) -> Result<u16> {
-    let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
+/// `port = 0` lets the OS pick an ephemeral port (the desktop app's behavior);
+/// a fixed port (e.g. `cm-serve`'s `8788`) yields a stable/bookmarkable URL. The
+/// port is returned immediately so bootstrap can build URLs / write
+/// `server-port.txt`; the server itself runs forever on the async runtime. Must
+/// be called from within a Tokio runtime context.
+pub async fn bind(state: AppState, dist_dir: PathBuf, port: u16) -> Result<u16> {
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     let port = listener.local_addr()?.port();
     let router = build_router(state, dist_dir);
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             eprintln!("[server] axum exited: {e}");
         }
@@ -237,6 +246,19 @@ async fn put_pricing(
 }
 
 // ---------------------------------------------------------------------------
+// /api/fx — USD-based billing-currency exchange rates (refreshed once/day)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/fx`: the cached USD-based FX rates. Reads the in-memory cache (no
+/// disk, no network) so it answers instantly; the `fx` thread keeps it fresh.
+/// Returns `{ base, rates, fetchedAt, stale }`. `stale` is true when the rates
+/// are older than the daily refresh window (e.g. the machine has been offline).
+async fn get_fx(State(state): State<AppState>) -> Json<fx::FxResponse> {
+    let cache = state.fx.read().await.clone();
+    Json(fx::response_from(&cache, chrono_now_ms() / 1000))
+}
+
+// ---------------------------------------------------------------------------
 // /api/settings — runtime toggles + Discord config (drives the settings panel)
 // ---------------------------------------------------------------------------
 
@@ -246,11 +268,15 @@ async fn put_pricing(
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsResponse {
-    pets_enabled: bool,
     monitor_enabled: bool,
+    notifications_enabled: bool,
     sound_enabled: bool,
     /// Volume as a `0.0..=1.0` float (stored internally as percent).
     sound_volume: f64,
+    /// Popover background opacity percent (`0..=100`) for the CSS acrylic tint.
+    popover_opacity: u8,
+    /// Billing display currency ISO code (USD/CNY/HKD/EUR/JPY/GBP).
+    currency: String,
     discord_enabled: bool,
     discord_client_id: Option<String>,
 }
@@ -260,10 +286,12 @@ struct SettingsResponse {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsPatch {
-    pets_enabled: Option<bool>,
     monitor_enabled: Option<bool>,
+    notifications_enabled: Option<bool>,
     sound_enabled: Option<bool>,
     sound_volume: Option<f64>,
+    popover_opacity: Option<u8>,
+    currency: Option<String>,
     discord_enabled: Option<bool>,
     discord_client_id: Option<String>,
 }
@@ -273,10 +301,12 @@ fn settings_snapshot(state: &AppState) -> SettingsResponse {
     let rt = &state.runtime;
     let persisted = settings::load();
     SettingsResponse {
-        pets_enabled: rt.pets_enabled.load(Ordering::Relaxed),
         monitor_enabled: rt.monitor_enabled.load(Ordering::Relaxed),
+        notifications_enabled: rt.notifications_enabled.load(Ordering::Relaxed),
         sound_enabled: rt.sound_enabled.load(Ordering::Relaxed),
         sound_volume: rt.sound_volume.load(Ordering::Relaxed) as f64 / 100.0,
+        popover_opacity: persisted.popover_opacity,
+        currency: persisted.currency,
         discord_enabled: persisted.discord_enabled,
         discord_client_id: persisted.discord_client_id,
     }
@@ -297,13 +327,13 @@ async fn put_settings(
     // Start from the persisted snapshot so untouched fields are preserved.
     let mut merged = settings::load();
 
-    if let Some(v) = patch.pets_enabled {
-        rt.pets_enabled.store(v, Ordering::Relaxed);
-        merged.pets_enabled = v;
-    }
     if let Some(v) = patch.monitor_enabled {
         rt.monitor_enabled.store(v, Ordering::Relaxed);
         merged.monitor_enabled = v;
+    }
+    if let Some(v) = patch.notifications_enabled {
+        rt.notifications_enabled.store(v, Ordering::Relaxed);
+        merged.notifications_enabled = v;
     }
     if let Some(v) = patch.sound_enabled {
         rt.sound_enabled.store(v, Ordering::Relaxed);
@@ -314,6 +344,16 @@ async fn put_settings(
         rt.sound_volume
             .store((clamped * 100.0).round() as u32, Ordering::Relaxed);
         merged.sound_volume = clamped;
+    }
+    if let Some(v) = patch.popover_opacity {
+        merged.popover_opacity = v.min(100);
+    }
+    if let Some(v) = patch.currency {
+        // Only accept known ISO codes; ignore anything else (keeps the file clean).
+        const KNOWN: &[&str] = &["USD", "CNY", "HKD", "EUR", "JPY", "GBP"];
+        if KNOWN.contains(&v.as_str()) {
+            merged.currency = v;
+        }
     }
     if let Some(v) = patch.discord_enabled {
         merged.discord_enabled = v;
@@ -519,20 +559,37 @@ fn chrono_now_ms() -> i64 {
 }
 
 /// Resolve the directory that holds the built frontend (`index.html`,
-/// `pet.html`, `assets/`). Tries, in order:
-/// 1. `CARGO_MANIFEST_DIR/../dist` (dev / `cargo run` from the workspace),
-/// 2. `current_exe()/../dist` and `current_exe()/../../dist` (bundled layouts),
-/// 3. the Tauri resource dir's `dist` (production bundle), supplied by caller.
+/// `popover.html`, `assets/`). Tries, in order:
+/// 1. the `CM_DIST` env override, when `allow_env` (browser mode opts in);
+/// 2. `CARGO_MANIFEST_DIR/../../dist` (dev / `cargo run` from the workspace —
+///    this crate lives at `crates/server`, so the workspace `dist/` is two up);
+/// 3. `current_exe()/dist` and `current_exe()/../dist` (bundled layouts);
+/// 4. each caller-supplied extra candidate (e.g. the Tauri resource dir's
+///    `dist`, or the resource dir itself), in order;
+/// 5. `cwd/dist`.
 ///
 /// Returns the first path that exists and contains `index.html`.
-pub fn resolve_dist_dir(resource_dir: Option<&Path>) -> Option<PathBuf> {
+///
+/// `allow_env` keeps the Tauri app's resolution byte-for-byte unaffected by a
+/// stray `CM_DIST` unless it explicitly opts in; `cm-serve` passes `true`.
+pub fn resolve_dist_dir(extra: &[PathBuf], allow_env: bool) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // 1. Workspace dev layout.
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest.join("..").join("dist"));
+    // 1. Explicit env override (browser mode / CI), opt-in.
+    if allow_env {
+        if let Ok(d) = std::env::var("CM_DIST") {
+            if !d.trim().is_empty() {
+                candidates.push(PathBuf::from(d));
+            }
+        }
+    }
 
-    // 2. Next to the executable (a few plausible relative layouts).
+    // 2. Workspace dev layout. NOTE: this crate is `crates/server`, so the
+    //    workspace root (and its `dist/`) is two directories up.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest.join("..").join("..").join("dist"));
+
+    // 3. Next to the executable (a few plausible relative layouts).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("dist"));
@@ -540,16 +597,30 @@ pub fn resolve_dist_dir(resource_dir: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
-    // 3. Tauri resource dir.
-    if let Some(res) = resource_dir {
-        candidates.push(res.join("dist"));
-        candidates.push(res.to_path_buf());
+    // 4. Caller-supplied candidates (Tauri resource dir etc.), in order.
+    candidates.extend(extra.iter().cloned());
+
+    // 5. Current working directory.
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("dist"));
     }
 
     candidates
         .into_iter()
         .find(|p| p.join("index.html").is_file())
         .map(|p| p.canonicalize().unwrap_or(p))
+}
+
+/// Convenience wrapper used by the Tauri shell: try the workspace/exe layouts
+/// plus the Tauri resource dir, WITHOUT consulting `CM_DIST` (so the desktop
+/// app's behavior is independent of that env var). Mirrors the original
+/// `resolve_dist_dir(resource_dir)` signature the shell used.
+pub fn resolve_dist_dir_with_resource(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let extra: Vec<PathBuf> = match resource_dir {
+        Some(res) => vec![res.join("dist"), res.to_path_buf()],
+        None => Vec::new(),
+    };
+    resolve_dist_dir(&extra, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,8 +802,8 @@ mod tests {
 
         // Seed non-default runtime values to prove the handler reads them.
         let runtime = RuntimeSettings {
-            pets_enabled: Arc::new(AtomicBool::new(false)),
             monitor_enabled: Arc::new(AtomicBool::new(true)),
+            notifications_enabled: Arc::new(AtomicBool::new(false)),
             sound_enabled: Arc::new(AtomicBool::new(false)),
             sound_volume: Arc::new(AtomicU32::new(40)),
         };
@@ -754,13 +825,57 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(v["petsEnabled"].as_bool(), Some(false));
         assert_eq!(v["monitorEnabled"].as_bool(), Some(true));
+        assert_eq!(v["notificationsEnabled"].as_bool(), Some(false));
         assert_eq!(v["soundEnabled"].as_bool(), Some(false));
         assert_eq!(v["soundVolume"].as_f64(), Some(0.40));
+        // Currency + popover-opacity are always present (read from settings.json).
+        assert!(v.get("popoverOpacity").is_some());
+        assert!(v.get("currency").is_some());
         // Discord fields are always present (read from settings.json).
         assert!(v.get("discordEnabled").is_some());
         assert!(v.get("discordClientId").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `GET /api/fx` returns 200 + the documented `{ base, rates, fetchedAt,
+    /// stale }` shape. With a fresh (empty) cache it reports USD base + stale.
+    #[tokio::test]
+    async fn fx_endpoint_returns_envelope() {
+        let dir = std::env::temp_dir().join(format!("cm-fx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("fx.sqlite");
+        let _ = Store::open(&db_path).unwrap();
+        let state = AppState::new(db_path, PriceTable::seeded(), RuntimeSettings::default());
+        // Seed a couple of rates so the payload is meaningful.
+        {
+            let mut g = state.fx.write().await;
+            g.base = "USD".to_string();
+            g.rates.insert("CNY".to_string(), 7.2);
+            g.rates.insert("USD".to_string(), 1.0);
+            g.fetched_at = chrono_now_ms() / 1000;
+        }
+        let app = build_router(state, dir.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fx")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["base"].as_str(), Some("USD"));
+        assert_eq!(v["rates"]["CNY"].as_f64(), Some(7.2));
+        assert!(v.get("fetchedAt").is_some());
+        assert!(v.get("stale").is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

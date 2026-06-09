@@ -5,14 +5,12 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  // Multipage build: dashboard (index.html) + pet (pet.html) +
-  // tray current-session popover (popover.html).
-  // Input paths are resolved relative to the project root by Vite.
+  // Multipage build: dashboard (index.html) + tray current-session popover
+  // (popover.html). Input paths are resolved relative to the project root by Vite.
   build: {
     rollupOptions: {
       input: {
         main: "index.html",
-        pet: "pet.html",
         popover: "popover.html",
       },
     },

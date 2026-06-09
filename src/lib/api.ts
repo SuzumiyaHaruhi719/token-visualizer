@@ -17,6 +17,7 @@ import type {
   AppSettings,
   AppSettingsPatch,
 } from "./types";
+import type { FxPayload } from "./currency";
 
 declare global {
   interface Window {
@@ -182,12 +183,24 @@ export function mockCurrent(): SessionState {
 
 export function mockSettings(): AppSettings {
   return {
-    petsEnabled: true,
     monitorEnabled: true,
+    notificationsEnabled: true,
     soundEnabled: true,
     soundVolume: 0.8,
+    popoverOpacity: 85,
+    currency: "USD",
     discordEnabled: false,
     discordClientId: null,
+  };
+}
+
+/** Representative USD-based FX rates for standalone/mock rendering. */
+export function mockFx(): FxPayload {
+  return {
+    base: "USD",
+    rates: { USD: 1, CNY: 7.2, HKD: 7.8, EUR: 0.92, JPY: 150, GBP: 0.79 },
+    fetchedAt: Math.floor(Date.now() / 1000),
+    stale: false,
   };
 }
 
@@ -245,6 +258,16 @@ export async function getSettings(): Promise<AppSettings> {
     return await getJson<AppSettings>(`/api/settings`);
   } catch {
     return mockSettings();
+  }
+}
+
+/** Fetch the USD-based billing-currency FX rates (cached server-side, daily). */
+export async function getFx(): Promise<FxPayload> {
+  if (isMockForced()) return mockFx();
+  try {
+    return await getJson<FxPayload>(`/api/fx`);
+  } catch {
+    return mockFx();
   }
 }
 

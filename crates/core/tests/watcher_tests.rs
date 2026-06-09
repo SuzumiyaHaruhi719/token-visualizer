@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use core::importer::read_new_complete_lines;
 use core::store::Store;
-use core::watcher::{process_file_update, watch, WatchEvent};
+use core::watcher::{process_file_update, process_reasonix_file_update, watch, WatchEvent};
 
 const ASSIST: &str = r#"{"type":"assistant","cwd":"/x/P","sessionId":"s","requestId":"r1","timestamp":"2026-06-05T10:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":7,"output_tokens":3}}}"#;
 
@@ -68,6 +68,40 @@ fn process_file_update_handles_multiple_lines_in_one_burst() {
 
     process_file_update(&file, &store, &tx).unwrap();
     assert_eq!(store.event_count().unwrap(), 2);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn process_reasonix_update_imports_only_canonical_usage_file() {
+    // A `usage.jsonl` directly under a `.reasonix` dir IS imported.
+    let dir = tempfile::tempdir().unwrap();
+    let reasonix = dir.path().join(".reasonix");
+    std::fs::create_dir_all(reasonix.join("sessions")).unwrap();
+    let usage = reasonix.join("usage.jsonl");
+    std::fs::write(
+        &usage,
+        "{\"ts\":1,\"session\":\"s\",\"model\":\"deepseek-v4-pro\",\"completionTokens\":5,\"cacheHitTokens\":40,\"cacheMissTokens\":10}\n",
+    )
+    .unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    let (tx, rx) = mpsc::channel::<WatchEvent>();
+    process_reasonix_file_update(&usage, &store, &tx).unwrap();
+    assert_eq!(store.event_count().unwrap(), 1);
+    let WatchEvent::Events { events, .. } = rx.try_recv().expect("expected a reasonix event");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].source, core::model::Source::DeepSeek);
+
+    // A nested `usage.jsonl` NOT under `.reasonix` is ignored (no import).
+    let stray = dir.path().join("backup").join("usage.jsonl");
+    std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
+    std::fs::write(
+        &stray,
+        "{\"ts\":2,\"session\":\"s\",\"model\":\"deepseek-v4-pro\",\"completionTokens\":1,\"cacheHitTokens\":0,\"cacheMissTokens\":1}\n",
+    )
+    .unwrap();
+    process_reasonix_file_update(&stray, &store, &tx).unwrap();
+    assert_eq!(store.event_count().unwrap(), 1, "a non-.reasonix usage.jsonl must be ignored");
     assert!(rx.try_recv().is_err());
 }
 

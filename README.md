@@ -1,27 +1,42 @@
 # Claude Monitor 🦀
 
-A lightweight Windows desktop app that gives you **full, persistent, real-time visibility into your Claude Code token usage** — plus **Clawd desktop pets** that animate to reflect what Claude is doing right now.
+A lightweight Windows desktop app that gives you **full, persistent, real-time visibility into your Claude Code token usage**.
 
-It reads Claude Code's own logs (**read-only**), stores everything in a local SQLite database, and shows three surfaces:
+It reads Claude Code's own logs (**read-only**), stores everything in a local SQLite database, and shows two surfaces:
 
 - **System-tray widget** — glance at the current session's live usage.
-- **Web dashboard** — charts and multi-dimensional breakdowns (by model / project / session / day / cache type), full history, cost estimate. Opens in the app window *or* any browser at the local URL.
-- **Clawd desktop pets** — one transparent, always-on-top pixel pet **per active Claude Code session**, labeled by project, with per-part animations for each work state: 😌 idle · 🤔 thinking · 🔧 working (shows the tool) · 💬 responding · ⏳ waiting · 💤 sleeping. A pet plays a leave animation when its session ends.
+- **Web dashboard** — charts and multi-dimensional breakdowns (by model / project / session / day / cache type), full history, cost estimate, plus a live **session strip** that shows each active session's work state (😌 idle · 🤔 thinking · 🔧 working, with the tool · 💬 responding · ⏳ waiting · 💤 sleeping). Opens in the app window *or* any browser at the local URL.
 
 ## Architecture
 
 ```
 ~/.claude/projects/**/*.jsonl  (token usage + events)   ──┐  read-only
 ~/.claude/sessions/<pid>.json  (live busy/idle status)  ──┤
+~/.codex/sessions/**/*.jsonl   (Codex usage + limits)   ──┤
                                                           ▼
-   crates/core  (Rust lib: parser · pricing · store · query · state · importer · watcher)
+   crates/core    (Rust lib: parser · pricing · store · query · state · importer · watcher · codex)
                                                           ▼
-   src-tauri    (Tauri 2 app: SQLite (WAL) + axum localhost server + SSE + tray + windows)
+   crates/server  (Rust lib `cmserver`: GUI-free core runtime — axum localhost
+                   server + SSE + SQLite (WAL) ingestion + fx + settings +
+                   discord + headless session-poll; `run_core`)
+                          ├──────────────────────────┐
+                          ▼                           ▼
+   src-tauri (desktop)    crates/cm-serve (browser mode `cm-serve`):
+   tray + window +        calls run_core, opens your default browser, blocks.
+   popover + notify       No tray/window/pet.
                                                           ▼
-   src/         (frontend: dashboard via ECharts + Clawd pet as a 12×8 SVG part-rig)
+   src/           (frontend: dashboard via ECharts + live session strip)
 ```
 
-The core logic is a pure, fully unit-tested Rust crate (`claude-monitor-core`). The Tauri app runs an embedded axum server on `127.0.0.1` that serves the built frontend **and** a JSON/SSE API; all windows (and any browser) talk to that one local server.
+The core logic is a pure, fully unit-tested Rust crate (`claude-monitor-core`). The
+GUI-free **`cmserver`** crate (`crates/server`) wraps it in `run_core(...)`: an
+embedded axum server on `127.0.0.1` that serves the built frontend **and** a JSON/SSE
+API, plus all ingestion/watchers/fx. Two front ends share `run_core` verbatim — the
+**Tauri desktop app** (`src-tauri`, which adds the tray/window/popover/notifications)
+and the headless **`cm-serve`** binary (`crates/cm-serve`, browser mode). Because both
+serve the identical frontend bundle, the dashboard (continuous token roll, ECharts,
+odometer reels, KPI/limits transitions, currency) behaves the same in a browser tab as
+in the desktop window; only the tray/popover/pet are desktop-only.
 
 ## Requirements
 
@@ -45,6 +60,41 @@ npm run tauri build
 # → installer under src-tauri/target/release/bundle/ (MSI/NSIS)
 ```
 
+## Browser mode (no desktop app) 🌐
+
+Run the **full dashboard in a normal web browser** — cross-platform (macOS / Windows /
+Linux), no Tauri window, tray, or pet. It's the same frontend bundle and the same local
+server, so every animation (continuous token roll, charts, odometer reels, limits
+countdowns, currency) works identically.
+
+**One command** (any OS, needs Node + Rust):
+
+```bash
+npm run serve          # = cargo run -p cm-serve --release; builds if needed, opens your browser
+```
+
+**Or double-click a launcher** (each builds if needed, then opens your browser):
+
+| OS | File | First-time note |
+|----|------|-----------------|
+| macOS | `serve.command` | `chmod +x serve.command` once (or right-click → Open to clear Gatekeeper) |
+| Linux / macOS | `serve.sh` | `chmod +x serve.sh` once |
+| Windows | `serve.bat` | just double-click |
+
+It serves a **stable, bookmarkable** URL (default `http://127.0.0.1:8788/`) and opens your
+default browser there. Environment overrides:
+
+- `CM_PORT` — port to bind (default `8788`), e.g. `CM_PORT=9000 npm run serve`.
+- `CM_DIST` — explicit path to the built frontend `dist/` (otherwise resolved relative to
+  the binary / workspace / cwd).
+- `CM_NO_OPEN=1` — don't auto-open a browser (headless servers, scripting).
+
+Notes:
+- The frontend `dist/` is built automatically by the launchers if missing (via `npm run build`).
+- If the desktop app is already running, `cm-serve` detects it and just opens your browser
+  at the existing instance instead of starting a second copy. Run the app **or** browser
+  mode (they share the same SQLite store; running both writers is not recommended).
+
 ## Data & configuration
 
 - Database: `%APPDATA%\claude-monitor\db.sqlite` (your usage history; survives restarts).
@@ -54,9 +104,12 @@ npm run tauri build
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo test -p claude-monitor-core   # core logic (parser/pricing/store/query/state/importer/watcher)
-npm test                            # frontend (format, pet state mapping, grid integrity, render)
+cargo test --workspace              # core logic + server (run_core/axum/fx/settings) + cm-serve smoke test
+npm test                            # frontend (format, session-state mapping, dashboard, settings)
 ```
+
+The `cm-serve` smoke test boots the real server on an ephemeral port and asserts
+`GET /` → 200 (index.html) and `GET /api/summary` → JSON.
 
 ## Notes
 

@@ -93,6 +93,7 @@ impl Store {
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
         self.conn.execute_batch(SCHEMA_SQL)?;
         self.migrate()?;
+        self.repair_data()?;
         Ok(())
     }
 
@@ -113,6 +114,33 @@ impl Store {
         // The `source` column now exists either way, so it is safe to index it.
         self.conn
             .execute_batch("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);")?;
+        Ok(())
+    }
+
+    /// One-time, forward-only DATA repairs keyed on `PRAGMA user_version` (an
+    /// integer in the DB header). Distinct from [`Self::migrate`], which fixes
+    /// the schema — this fixes already-imported rows. Each repair runs at most
+    /// once per database and is a no-op on a fresh one.
+    fn repair_data(&self) -> Result<()> {
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+        // Repair 1: before the incremental-read fix, Codex tail reads attributed
+        // live `token_count` turns to model "" (surfaced as the "other" bucket),
+        // because the model — declared once near the top of a rollout — was not
+        // rebuilt when reading from a stored offset. Drop those misattributed
+        // rows and reset the Codex import offsets so the next backfill re-imports
+        // every rollout from the start with the correct model. Safe: Codex events
+        // are fully regenerable from the read-only rollout logs.
+        if version < 1 {
+            self.conn.execute_batch(
+                "DELETE FROM events WHERE source = 'codex' AND model = '';
+                 DELETE FROM import_state WHERE file LIKE 'codex:%';",
+            )?;
+            self.conn.pragma_update(None, "user_version", 1i64)?;
+        }
+
         Ok(())
     }
 
@@ -328,6 +356,92 @@ mod tests {
 
         // Idempotent: opening again is a no-op, not an error.
         let _ = Store::open(&path).expect("second open should also succeed");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Repair #1: a DB carrying Codex rows misattributed to model "" (the
+    /// pre-fix "other" bucket) is cleaned on open — the bad rows are dropped and
+    /// the Codex offsets reset so the next backfill re-imports them — while the
+    /// correctly-attributed Codex rows and all Claude rows are kept. The repair
+    /// is keyed on `user_version`, so it runs once and never again.
+    #[test]
+    fn repairs_codex_empty_model_attribution_once() {
+        let path = temp_db_path();
+
+        let seed_event = |conn: &Connection, id: &str, model: &str, source: &str| {
+            conn.execute(
+                "INSERT INTO events
+                    (request_id, ts, session_id, project, model,
+                     input, output, cache_create, cache_read, web_search, web_fetch, source)
+                 VALUES (?1, 1, 's', 'p', ?2, 100, 0, 0, 0, 0, 0, ?3)",
+                params![id, model, source],
+            )
+            .unwrap();
+        };
+
+        // A DB created before the repair shipped: user_version 0, seeded with a
+        // misattributed Codex row, a good Codex row, a Claude row, and a Codex
+        // import offset that would otherwise skip re-import.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.pragma_update(None, "user_version", 0i64).unwrap();
+            seed_event(&conn, "cx-bad", "", "codex");
+            seed_event(&conn, "cx-good", "gpt-5.5", "codex");
+            seed_event(&conn, "cc", "claude-opus-4-8", "claude");
+            conn.execute(
+                "INSERT INTO import_state(file, byte_offset, schema_version)
+                 VALUES ('codex:/x/rollout.jsonl', 4096, 2)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Opening runs repair_data().
+        let store = Store::open(&path).unwrap();
+        let count = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+        assert_eq!(
+            count("SELECT count(*) FROM events WHERE source='codex' AND model=''"),
+            0,
+            "misattributed Codex rows dropped"
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM events WHERE source='codex' AND model='gpt-5.5'"),
+            1,
+            "correctly-attributed Codex rows kept"
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM events WHERE source='claude'"),
+            1,
+            "Claude rows untouched"
+        );
+        assert_eq!(
+            store.get_offset("codex:/x/rollout.jsonl").unwrap(),
+            0,
+            "Codex offset reset so backfill re-imports"
+        );
+        let uv: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, 1, "repair marked done");
+
+        // One-shot: a fresh misattributed row inserted after the repair must
+        // survive a re-open (the gate prevents the repair from running again).
+        seed_event(&store.conn, "cx-bad2", "", "codex");
+        drop(store);
+        let store2 = Store::open(&path).unwrap();
+        let bad2: i64 = store2
+            .conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE request_id='cx-bad2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad2, 1, "repair is one-shot, not run on every open");
 
         let _ = std::fs::remove_file(&path);
     }

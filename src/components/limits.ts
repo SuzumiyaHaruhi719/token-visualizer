@@ -51,6 +51,10 @@ function gaugeMarkup(label: string, win: RateWindow | null): string {
   }
   const used = clampPercent(win.usedPercent);
   const left = clampPercent(win.remainingPercent);
+  // Render the fill at its FINAL width directly (no grow-from-0). The panel is
+  // re-rendered whenever live data lands; animating 0->used on every refresh read
+  // as the gauge "constantly auto-refreshing", so it now paints statically and
+  // changes only when the percentage actually does.
   return `
     <div class="limit-gauge" data-resets-at="${win.resetsAt}">
       <div class="limit-gauge-head">

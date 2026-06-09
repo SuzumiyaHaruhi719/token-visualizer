@@ -6,14 +6,18 @@
 //! data directory.
 
 pub mod codex;
+pub mod codex_live;
 pub mod importer;
 pub mod model;
 pub mod parser;
 pub mod paths;
 pub mod pricing;
 pub mod query;
+pub mod reasonix;
+pub mod reasonix_live;
 pub mod state;
 pub mod store;
+pub mod text;
 pub mod watcher;
 
 pub use model::{

@@ -17,7 +17,10 @@ use std::time::Duration;
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::importer::{codex_offset_key, read_new_codex_events, read_new_complete_lines};
+use crate::importer::{
+    codex_offset_key, read_new_codex_events, read_new_complete_lines, read_new_reasonix_events,
+    reasonix_offset_key,
+};
 use crate::model::{LineKind, ParsedEvent};
 use crate::store::Store;
 
@@ -149,6 +152,85 @@ fn is_codex_rollout(path: &Path) -> bool {
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with("rollout-"))
             .unwrap_or(false)
+}
+
+/// Process a change to the Reasonix `usage.jsonl`: read new complete lines from
+/// the (namespaced) stored offset, persist the parsed turns, advance the offset,
+/// and forward a [`WatchEvent`] if anything new was read. Only the file named
+/// exactly `usage.jsonl` is acted on; the session conversation/event logs are
+/// ignored here (they drive live state, not billing). The sessions dir (for
+/// project resolution) is the sibling `sessions/` of the usage file's parent.
+pub fn process_reasonix_file_update(
+    path: &Path,
+    store: &Store,
+    tx: &Sender<WatchEvent>,
+) -> Result<()> {
+    if !is_reasonix_usage(path) {
+        return Ok(());
+    }
+    let sessions_dir = path
+        .parent()
+        .map(|p| p.join("sessions"))
+        .unwrap_or_else(|| PathBuf::from("sessions"));
+
+    let key = reasonix_offset_key(path);
+    let offset = store.get_offset(&key)?;
+    let read = read_new_reasonix_events(path, &sessions_dir, offset)?;
+
+    if read.new_offset == offset && read.events.is_empty() {
+        return Ok(()); // nothing new
+    }
+
+    if !read.events.is_empty() {
+        let batch: Vec<(ParsedEvent, i64)> = read
+            .events
+            .iter()
+            .cloned()
+            .map(|e| (e, read.start_offset as i64))
+            .collect();
+        store.insert_batch_at(&batch, &path.to_string_lossy())?;
+    }
+    store.set_offset(&key, read.new_offset)?;
+
+    if !read.events.is_empty() {
+        let _ = tx.send(WatchEvent::Events {
+            file: path.to_path_buf(),
+            events: read.events,
+            lines: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+/// True ONLY for the canonical top-level Reasonix `usage.jsonl` billing file
+/// (`<...>/.reasonix/usage.jsonl`). The watcher is recursive, so this guards
+/// against importing some unrelated nested `usage.jsonl` (e.g. a backup under a
+/// subdir): the file must be named `usage.jsonl` AND sit directly in a
+/// `.reasonix` directory.
+fn is_reasonix_usage(path: &Path) -> bool {
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "usage.jsonl")
+        .unwrap_or(false);
+    let in_reasonix_root = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|n| n == ".reasonix")
+        .unwrap_or(false);
+    named && in_reasonix_root
+}
+
+/// Start watching `reasonix_dir` (`~/.reasonix`) recursively for changes to its
+/// `usage.jsonl`. Mirrors [`watch`] / [`watch_codex`] but routes updates through
+/// [`process_reasonix_file_update`].
+pub fn watch_reasonix(
+    reasonix_dir: &Path,
+    store: Store,
+    tx: Sender<WatchEvent>,
+) -> Result<WatchHandle> {
+    watch_with(reasonix_dir, store, tx, process_reasonix_file_update)
 }
 
 /// Start watching `codex_sessions_dir` recursively for Codex rollout files.

@@ -1,7 +1,7 @@
 [package]
 name = "claude-monitor"
 version = "0.1.0"
-description = "Claude Monitor — token usage + Clawd work-state desktop pets"
+description = "Claude Monitor — Claude Code token usage + live session state"
 edition = "2021"
 
 [lib]
@@ -15,21 +15,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 cmcore = { path = "../crates/core", package = "claude-monitor-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-axum = "0.7"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
-dirs = "5"
+# The GUI-free core runtime (axum server + ingestion + settings/fx/discord +
+# headless state-poll). The desktop shell calls `cmserver::run_core` then layers
+# the window/tray/popover/notifications on top.
+cmserver = { path = "../crates/server", package = "claude-monitor-server" }
 anyhow = "1"
-walkdir = "2"
-discord-rich-presence = "0.2"
 
-# Windows-only: lightweight PlaySoundW for the session-end chime (no audio-graph deps).
+# Windows-only: lightweight PlaySoundW for the session-end chime (no audio-graph
+# deps) + DWM for rounding the frameless acrylic popover's native window corners
+# (so the acrylic backdrop isn't a hard square behind the rounded card).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Foundation"] }
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Foundation", "Win32_Graphics_Dwm"] }

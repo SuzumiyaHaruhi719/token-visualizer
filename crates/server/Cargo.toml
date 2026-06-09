@@ -1,0 +1,29 @@
+[package]
+name = "claude-monitor-server"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Monitor — headless core runtime (axum server + ingestion), no GUI"
+
+[lib]
+name = "cmserver"
+
+[dependencies]
+cmcore = { path = "../core", package = "claude-monitor-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = "0.7"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+dirs = "5"
+anyhow = "1"
+walkdir = "2"
+discord-rich-presence = "0.2"
+# Billing-currency FX: USD-based rates fetched once/day from a free no-key API.
+# `blocking` runs on a dedicated std::thread (never inside the axum/tokio
+# handlers). rustls is reqwest's default TLS, so no extra TLS feature is needed.
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

@@ -1,12 +1,33 @@
-/* Tray "current session" popover — acrylic glass + glow, matches the dashboard. */
+/* Tray "today" popover — a FRAMELESS, RESIZABLE, ACRYLIC card.
+   ---------------------------------------------------------------------------
+   The window is transparent(true) with a native Windows acrylic backdrop
+   (DWM), applied in src-tauri/src/windows.rs. The body is fully transparent so
+   the blur shows; #popover paints a SEMI-TRANSPARENT dark tint OVER the blur.
+   The tint's alpha = the user's "Tray background" opacity (settings), injected
+   live as the CSS var --pop-alpha (0..1). Windows 11 ignores the native effect
+   tint, so this CSS layer IS the opacity control.
+
+   Size-adaptive: as the window GROWS (height) it progressively reveals sections
+   (token hero → Codex session → top-3 models → live sessions); shrinking hides
+   them bottom-up. The hero reel's digit precision adapts to WIDTH. The reveal is
+   driven by data-tier / data-width classes set from popover-main.ts (measured
+   via ResizeObserver), not CSS media queries (the window, not the viewport,
+   is what matters). */
 
 :root {
-  --pop-text: #f3f4f8;
-  --pop-muted: #aab0c0;
+  --pop-text: #f4f6fb;
+  --pop-muted: #8a91a6;
+  --pop-faint: #5b6177;
   --accent: #ff8a5c;
-  --teal: #54d2b4;
-  --blue: #8aa2e0;
-  --gold: #e8b06a;
+  /* Live opacity of the dark tint over the acrylic (0..1); JS overrides it. */
+  --pop-alpha: 0.85;
+  /* Horizontal scale applied to the hero reel when a value would otherwise
+     overflow the card at a narrow width (set live from popover-main.ts). */
+  --pop-hero-scale: 1;
+  /* The card corner radius. Kept close to the Windows 11 DWM rounded-corner
+     radius so the acrylic backdrop (rounded by DWMWCP_ROUND) and this CSS card
+     share one edge — no square acrylic peeking outside the tinted card. */
+  --pop-radius: 11px;
   font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -14,99 +35,556 @@ html,
 body {
   margin: 0;
   height: 100%;
-  /* OPAQUE dark surface. The popover window is NOT transparent: WebView2
-     transparent windows render an ugly black box around the rounded content on
-     Windows. A solid dark fill (matching the dashboard panels) avoids that; the
-     OS rounds the frameless window's corners. */
-  background: #0e1118;
+  /* Transparent so the native acrylic blur is visible behind the tint. */
+  background: transparent;
+  color: var(--pop-text);
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
 }
 
-/* WINDOW-SIZING CONTRACT — the Rust side sizes the window to match these
-   constants, so do NOT change them without flagging it: 6px padding, one 84px
-   card per session, 8px gap between cards. Content height for N cards =
-   6 + N*84 + (N-1)*8 + 6. Up to 6 cards render. */
 #popover {
+  position: relative;
   box-sizing: border-box;
   width: 100%;
   height: 100%;
-  padding: 6px;
+  padding: 17px 17px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  cursor: grab; /* draggable: data-tauri-drag-region is on this element */
+  border-radius: var(--pop-radius);
+  /* The dark tint OVER the acrylic. A UNIFORM dark tint — the number sits on a
+     flat field so there is NO visible color step/band between the digits and the
+     background at any opacity (fix #4). The coral radial glow + the strong
+     top→bottom step both banded against the dark tint, so the coral glow is
+     removed and the vertical gradient's two stops are made nearly identical
+     (a barely-there depth shade, not a visible transition). The alpha is the
+     live opacity var so the slider still blends near-clear → near-solid. */
+  background: linear-gradient(
+    180deg,
+    rgba(18, 22, 32, var(--pop-alpha)),
+    rgba(16, 20, 29, var(--pop-alpha))
+  );
+  /* A SOFT top-edge sheen instead of a full 1px frame (the old inset hairline
+     read as a harsh square outline — the "描边"). A faint top highlight + a
+     barely-there bottom shade give the card depth without a hard border, so the
+     rounded acrylic edge stays clean against any wallpaper. */
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 0 rgba(0, 0, 0, 0.16);
+  cursor: grab; /* whole card is the drag-MOVE region (data-tauri-drag-region) */
+  overflow: hidden; /* clip content to the rounded corners — no square bleed */
 }
 #popover:active {
   cursor: grabbing;
 }
-/* The popover has no interactive elements, so let every mousedown fall through
-   to #popover (the drag region) — this makes the whole card draggable, not
-   just the padding gaps between the text spans. */
-#popover * {
+
+/* Content must NOT eat the drag-region mousedown — EXCEPT interactive bits
+   (resize handles). Previously `#popover * { pointer-events:none }` killed the
+   handles too; scope the passthrough to content only and re-enable handles. */
+.pop-content,
+.pop-content * {
   pointer-events: none;
 }
+.pop-resize {
+  pointer-events: auto;
+}
 
-.pop-card {
-  box-sizing: border-box;
-  width: 100%;
-  height: 84px;     /* fixed — the Rust window height depends on this */
-  flex: 0 0 84px;
+/* The content column. Sections are wrapped in `.pop-reveal` and revealed by
+   tier (see bottom). NO column `gap` here on purpose: a collapsed (0fr) reveal
+   would otherwise still contribute a phantom gap. The inter-section spacing
+   lives in `.pop-reveal.is-visible`'s `margin-top`, which animates to/from 0
+   together with the collapse — so hidden sections take ZERO vertical space and
+   the auto-fit leaves no dead band (fix #3 + #5). */
+.pop-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* --- tier reveal wrapper (animated collapse) ------------------------------ */
+/* Each non-hero section sits in `.pop-reveal > .pop-reveal-inner`. Collapsed,
+   the wrapper is a 0fr grid row (height 0) with the inner clipped; revealed, it
+   animates to 1fr with a soft fade + slide. Animating grid-template-rows (not
+   `display`) is what makes the reveal smooth — `display:none` cannot transition
+   (fix #5). The inner keeps its true height at all times, which is what the
+   auto-fit measures (see naturalContentHeight). */
+.pop-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-6px);
+  margin-top: 0;
+  transition:
+    grid-template-rows 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.22s ease,
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pop-reveal-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.pop-reveal.is-visible {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: none;
+  margin-top: 14px;
+}
+
+/* Section eyebrow labels */
+.pop-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--pop-faint);
+}
+
+/* --- Today hero (the reel) ------------------------------------------------- */
+.pop-today {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 11px 15px;
-  border-radius: 16px;
-  background: linear-gradient(160deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04));
-  -webkit-backdrop-filter: blur(30px) saturate(170%);
-  backdrop-filter: blur(30px) saturate(170%);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow:
-    0 16px 40px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  flex: none;
+}
+.pop-today-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+/* Today's spend, in the chosen currency (Part-1 formatter). */
+.pop-spend {
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: -0.3px;
+  font-variant-numeric: tabular-nums;
   color: var(--pop-text);
 }
+.pop-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  /* The number group may shrink/clip; the unit label is fixed. */
+  overflow: hidden;
+}
+/* The reel container. The reused odometer (reels mode) mounts its .el here; we
+   color + size the glyphs via these vars so it matches the dashboard look. The
+   `--pop-hero-scale` transform (set live when a value would overflow a narrow
+   card) shrinks the number horizontally from its left baseline so it never
+   collides with the unit label (fix #1). */
+.pop-hero-num {
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1.4px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  transform: scale(var(--pop-hero-scale));
+  transform-origin: left bottom;
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* Compact-mode suffix (K/M/B/T) shown beside the scaled reel when narrow. */
+.pop-hero-suffix {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: var(--accent);
+  margin-left: 1px;
+  transform: scale(var(--pop-hero-scale));
+  transform-origin: left bottom;
+  flex: none;
+}
+.pop-hero-unit {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pop-muted);
+  flex: none; /* never squeezed — the number scales instead */
+  white-space: nowrap;
+}
 
-/* Header: status dot + project, model on the right */
-.pop-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* The reused reels odometer, recolored for the popover hero. NO drop-shadow
+   glow: the coral halo banded against the dark tint and left a visible ring edge
+   around the digits (fix #4). The solid accent color reads cleanly on the flat
+   tint on its own. `will-change: transform` still promotes the reel to its own
+   GPU layer so the per-frame digit roll stays smooth. */
+.pop-hero-num .odometer-reels {
+  display: inline-flex;
+  align-items: flex-start;
+  line-height: 1;
+  will-change: transform;
+  transform: translateZ(0);
+}
+/* Reel digit reflow (precision step add/remove a digit cell): animate width +
+   fade so a width change steps in/out instead of snapping (fix: jumpy reflow). */
+.pop-hero-num .odometer-reels .odo-digit,
+.pop-hero-num .odometer-reels .odo-sep {
+  transition: width 0.32s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.32s ease;
+}
+.pop-hero-num .odometer-reels .odo-enter {
+  width: 0;
+  opacity: 0;
+}
+/* The unit suffix (K/M/B/T) eases in beside the reel (opacity + the overflow
+   scale share one transition; listed together so neither clobbers the other). */
+.pop-hero-suffix {
+  transition: opacity 0.25s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pop-hero-num .odometer-reels .odo-digit {
+  display: inline-block;
+  overflow: hidden;
+  height: 1.18em;
+  padding-block: 0.07em;
+  width: 1ch;
+  vertical-align: top;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 84%, transparent 100%);
+}
+.pop-hero-num .odometer-reels .odo-strip {
+  display: flex;
+  flex-direction: column;
+}
+.pop-hero-num .odometer-reels .odo-glyph {
+  display: block;
+  flex: 0 0 1em;
+  height: 1em;
+  line-height: 1.08;
+  text-align: center;
+}
+.pop-hero-num .odometer-reels .odo-sep {
+  display: inline-block;
+  vertical-align: top;
+  width: 0.42ch;
+  height: 1.18em;
+  line-height: 1.08;
+  overflow: hidden;
+  text-align: center;
+}
+
+/* --- Codex session (tier ≥ 2) --------------------------------------------- */
+.pop-codex {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  flex: none;
+  padding: 11px 13px 12px;
+  border-radius: 12px;
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.022));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.pop-codex-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.pop-codex-model {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--pop-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pop-codex-tok {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--pop-muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+/* The 5h / weekly rate windows (only shown when there's vertical room). */
+.pop-codex-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pop-win {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+}
+.pop-win-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--pop-faint);
+}
+.pop-win-bar {
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.pop-win-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #54d2b4, #8aa2e0);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pop-win-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pop-muted);
+  font-variant-numeric: tabular-nums;
+}
+.pop-codex-empty {
+  font-size: 12px;
+  color: var(--pop-muted);
+}
+
+/* --- Top models (tier ≥ 3) ------------------------------------------------- */
+.pop-models {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.pop-model-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.pop-model-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "dot name tok"
+    "bar bar bar";
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 5px;
+  transition: opacity 0.26s ease, transform 0.26s ease;
+}
+.pop-model-row.entering {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.pop-model-row.leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+}
 .pop-dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--pop-muted); flex: 0 0 auto;
-  box-shadow: 0 0 9px 1px currentColor;
+  grid-area: dot;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
 }
-.pop-dot.k-working { background: var(--accent); color: var(--accent); }
-.pop-dot.k-thinking { background: var(--blue); color: var(--blue); }
-.pop-dot.k-responding { background: var(--teal); color: var(--teal); }
-.pop-dot.k-waiting { background: var(--gold); color: var(--gold); }
-.pop-dot.k-idle { background: #6e7484; color: #6e7484; }
-.pop-dot.k-sleeping { background: #5a5a72; color: #5a5a72; }
+.pop-name {
+  grid-area: name;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--pop-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pop-tok {
+  grid-area: tok;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pop-muted);
+  font-variant-numeric: tabular-nums;
+}
+.pop-bar {
+  grid-area: bar;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.pop-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pop-model-empty {
+  list-style: none;
+  color: var(--pop-muted);
+  font-size: 12.5px;
+}
 
-.pop-project {
-  font-size: 13.5px; font-weight: 650;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  flex: 1 1 auto; min-width: 0;
+/* --- Live sessions (tier ≥ 4) --------------------------------------------- */
+.pop-sessions {
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.pop-model { font-size: 11px; color: var(--gold); white-space: nowrap; flex: 0 0 auto; }
+.pop-sess-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+}
+/* Two-line session row: line 1 = source icon + last user message + freshness;
+   line 2 = state pill + dimmed model + tokens. Project name removed. */
+.pop-sess-row {
+  display: flex;
+  flex-direction: column;
+  row-gap: 3px;
+  font-size: 11.5px;
+  min-width: 0;
+  padding: 1px 0;
+}
+.pop-sess-top {
+  display: grid;
+  grid-template-columns: 11px minmax(0, 1fr) auto;
+  column-gap: 6px;
+  align-items: center;
+}
+/* Source glyph (Claude=coral / Codex=blue) replaces the old text badge. */
+.pop-sess-icon {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  color: #ff8a5c;
+}
+.pop-sess-icon--codex { color: #8aa2e0; }
+.pop-sess-icon--deepseek { color: #a98bf0; }
+.pop-sess-msg {
+  font-weight: 600;
+  color: var(--pop-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pop-sess-msg-empty { color: var(--pop-muted); font-weight: 500; }
+.pop-sess-fresh {
+  min-width: 46px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: rgba(232, 238, 255, 0.4);
+}
+/* Line 2: state pill + secondary metadata, indented under the message. */
+.pop-sess-meta {
+  margin-left: 17px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.pop-sess-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pop-faint);
+  flex: none;
+}
+.pop-sess-dot.active {
+  background: #54d2b4;
+  box-shadow: 0 0 6px 1px rgba(84, 210, 180, 0.7);
+}
+/* State as a soft filled pill, tinted per kind. */
+.pop-sess-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: capitalize;
+  white-space: nowrap;
+  color: var(--pop-muted);
+  background: rgba(255, 255, 255, 0.07);
+}
+.pop-sess-state-working { color: #ffb38c; background: rgba(255, 138, 92, 0.16); }
+.pop-sess-state-thinking { color: #aebdf0; background: rgba(138, 162, 224, 0.16); }
+.pop-sess-state-responding { color: #84e0c8; background: rgba(84, 210, 180, 0.16); }
+.pop-sess-state-waiting { color: #f0c98a; background: rgba(232, 176, 106, 0.16); }
+.pop-sess-state-working .pop-sess-dot { background: #ff8a5c; }
+.pop-sess-state-thinking .pop-sess-dot { background: #8aa2e0; }
+.pop-sess-state-responding .pop-sess-dot { background: #54d2b4; }
+.pop-sess-state-waiting .pop-sess-dot { background: #e8b06a; }
+.pop-sess-model {
+  color: var(--pop-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pop-sess-tok {
+  color: var(--pop-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+  opacity: 0.85;
+}
+.pop-sess-empty {
+  font-size: 12px;
+  color: var(--pop-muted);
+}
 
-/* Metric grid: token / cache / cost */
-.pop-grid {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 2px;
+/* --- Size-adaptive reveal -------------------------------------------------- */
+/* Visibility is driven by `.pop-reveal.is-visible` (toggled per tier from
+   popover-main.ts → applyTierReveals) using the animated grid collapse defined
+   near the top of this file. Sections themselves are plain flex columns at their
+   NATURAL height; the window auto-fits to that content (no dead whitespace), so
+   there are no `display:none` jumps and no flex:1 "absorb the gap" hacks here.
+   The Codex 5h/weekly LIMIT windows reveal WITH the Codex card (tier 2), i.e.
+   BEFORE the top-models (tier 3) — the required priority order (fix #6). */
+.pop-codex,
+.pop-models,
+.pop-sessions {
+  display: flex;
 }
-.pop-metric { display: flex; flex-direction: column; gap: 2px; }
-.pop-metric-value {
-  font-size: 16px; font-weight: 700; line-height: 1.05; letter-spacing: -0.3px;
-  background: linear-gradient(180deg, #ffffff, #cfd4e2);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.pop-metric-label {
-  font-size: 9.5px; color: var(--pop-muted);
-  text-transform: uppercase; letter-spacing: 0.06em;
+.pop-codex-windows {
+  display: flex;
 }
 
-/* Empty state — a single 84px card with centered text. */
-.pop-empty-card { justify-content: center; gap: 0; }
-.pop-empty {
-  display: flex; align-items: center; justify-content: center;
-  width: 100%; height: 100%; font-size: 13px; color: var(--pop-muted);
+/* Live-session rows fade/slide in as the list (re)renders. */
+.pop-sess-row {
+  animation: pop-section-in 0.24s ease;
 }
+@keyframes pop-section-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Frameless resize handles --------------------------------------------- */
+/* Thin invisible strips on the edges + corners. They sit ABOVE the drag-move
+   region and call start_resize_dragging (popover-main.ts). The move-drag region
+   covers the interior, so the two gestures don't conflict. */
+.pop-resize {
+  position: absolute;
+  z-index: 5;
+}
+.pop-resize-e { top: 8px; right: 0; width: 6px; bottom: 8px; cursor: ew-resize; }
+.pop-resize-s { left: 8px; bottom: 0; height: 6px; right: 8px; cursor: ns-resize; }
+.pop-resize-w { top: 8px; left: 0; width: 6px; bottom: 8px; cursor: ew-resize; }
+.pop-resize-n { left: 8px; top: 0; height: 6px; right: 8px; cursor: ns-resize; }
+.pop-resize-se { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.pop-resize-sw { left: 0; bottom: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.pop-resize-ne { right: 0; top: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.pop-resize-nw { left: 0; top: 0; width: 12px; height: 12px; cursor: nwse-resize; }

@@ -1,12 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions for the dashboard and per-session pet windows.",
-  "windows": ["dashboard", "pet-*", "popover"],
+  "description": "Core permissions for the dashboard and the tray popover. These windows load from the app's OWN loopback server — a REMOTE origin to Tauri — so `remote` is required for the few IPC commands the UI invokes (window MOVE dragging, frameless RESIZE dragging from the popover's edge/corner handles, and F11 fullscreen); everything else goes over the HTTP API. The server binds 127.0.0.1 and `server_url()` builds `http://127.0.0.1:<port>/…`, so the pattern MUST use the literal `127.0.0.1` host (URLPattern does NOT treat `localhost` and `127.0.0.1` as equivalent). The `:*` port wildcard is required because the port is dynamic; the pathname auto-fills to `*` so root, `/popover.html`, and `?query` URLs all match. `localhost:*` is kept for the Vite devUrl in debug builds.",
+  "windows": ["dashboard", "popover"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "opener:default",
     "notification:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "allow-set-popover-height"
   ]
 }
