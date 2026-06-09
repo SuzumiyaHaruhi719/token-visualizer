@@ -335,9 +335,9 @@ function renderTimeseries(
   s: Summary,
   chartMotion: ChartMotion = CHART_MOTION,
 ): void {
-  // "today" uses an hourly intraday curve drawn as a smooth gradient AREA chart;
-  // every other range uses daily buckets drawn as stacked BARS.
-  const isDay = (s.range as RangeKey) === "today";
+  // "today" + "all" use a smooth gradient AREA chart (the intraday / long-range
+  // curve reads better than a wall of bars); "7d" / "30d" stay daily stacked BARS.
+  const isArea = (s.range as RangeKey) === "today" || (s.range as RangeKey) === "all";
   const x = s.timeseries.map((b) => bucketLabel(b.bucket, s.range as RangeKey));
   const singlePoint = x.length <= 1;
   const defs = [
@@ -348,7 +348,7 @@ function renderTimeseries(
   ] as const;
 
   const series = defs.map(([name, key, color]) =>
-    isDay
+    isArea
       ? {
           name,
           type: "line" as const,
@@ -385,7 +385,7 @@ function renderTimeseries(
       tooltip: {
         trigger: "axis",
         axisPointer: {
-          type: isDay ? "line" : "shadow",
+          type: isArea ? "line" : "shadow",
           lineStyle: { color: COLORS.axis },
         },
         valueFormatter: (v: number) => formatTokens(v),
@@ -399,7 +399,7 @@ function renderTimeseries(
       grid: { left: 56, right: 16, top: 36, bottom: 28 },
       xAxis: {
         type: "category",
-        boundaryGap: !isDay, // bars sit inside categories; the area spans edge-to-edge
+        boundaryGap: !isArea, // bars sit inside categories; the area spans edge-to-edge
         data: x,
         axisLine: { lineStyle: { color: COLORS.axis } },
         axisLabel: { color: COLORS.label },
