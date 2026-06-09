@@ -6,6 +6,7 @@
 //! write while the UI reads.
 
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -19,6 +20,19 @@ pub const SCHEMA_VERSION: i64 = 2;
 /// How long a connection waits for the write lock before returning SQLITE_BUSY.
 /// Sized to outlast a worst-case backfill write burst so readers never fail.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serializes the one-time `init()` write phase across connections **in this
+/// process**. `run_core` opens 6+ connections nearly simultaneously (Claude +
+/// Codex + Reasonix backfills and watchers, plus per-request server opens), and
+/// `init()` runs `PRAGMA journal_mode=WAL` + the schema DDL. Flipping the journal
+/// mode needs an exclusive lock and **does not honor `busy_timeout`** — it
+/// returns SQLITE_BUSY ("database is locked") immediately. Without this lock the
+/// losing threads failed at `Store::open` and skipped their entire backfill, so a
+/// fresh DB imported only whichever source won the race (e.g. Reasonix) and
+/// dropped all Claude/Codex history. Holding this mutex only for `init()` (never
+/// for the connection's lifetime) lets exactly one thread perform the WAL flip
+/// uncontended; the rest then see an already-WAL DB and run idempotent no-op DDL.
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
@@ -68,7 +82,14 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         let store = Self { conn };
-        store.init(true)?;
+        {
+            // Serialize the WAL flip + schema DDL so concurrent opens in this
+            // process don't race on SQLITE_BUSY (see `INIT_LOCK`). Recover from a
+            // poisoned lock: the guarded section only runs idempotent setup, so a
+            // prior panic leaves no half-written invariant to protect.
+            let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            store.init(true)?;
+        }
         Ok(store)
     }
 
@@ -306,6 +327,48 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("cm-store-test-{}-{now}.sqlite", std::process::id()))
+    }
+
+    /// Regression: `run_core` opens many connections to the same fresh DB at
+    /// once (Claude + Codex + Reasonix backfills and watchers). Each `open` runs
+    /// `PRAGMA journal_mode=WAL` in `init()`, which ignores `busy_timeout` and
+    /// returns SQLITE_BUSY immediately under contention. Before serializing
+    /// `init()` this raced: losing threads failed to open and skipped their whole
+    /// backfill, so a fresh DB kept only whichever source won (Reasonix) and lost
+    /// all Claude/Codex history. A `Barrier` forces every thread to hit the WAL
+    /// flip simultaneously so the race is reliably triggered; all opens must
+    /// succeed and the DB must end up in WAL mode.
+    #[test]
+    fn concurrent_opens_on_a_fresh_db_all_succeed() {
+        use std::sync::{Arc, Barrier};
+
+        let path = temp_db_path();
+        let _ = std::fs::remove_file(&path); // ensure a truly fresh DB
+
+        const THREADS: usize = 16;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait(); // release all threads into init() together
+                    Store::open(&path).map(|s| s.journal_mode().unwrap())
+                })
+            })
+            .collect();
+
+        for h in handles {
+            let mode = h
+                .join()
+                .expect("open thread panicked")
+                .expect("Store::open must not fail under concurrent init");
+            assert_eq!(mode, "wal", "file-backed DB must be in WAL mode");
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     /// Regression: opening a pre-existing v1 DB (events table lacking `source`)
