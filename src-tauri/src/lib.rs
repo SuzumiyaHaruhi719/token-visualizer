@@ -49,6 +49,16 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // macOS: run as a menu-bar (Accessory) app, mirroring the tray-first
+            // design on Windows. The dashboard + popover are created hidden and
+            // revealed from the tray, so a Dock icon (and the default "Regular"
+            // policy that expects a visible window) would be wrong here — it would
+            // bounce in the Dock with no window to show. Accessory keeps the app
+            // alive in the menu bar with no Dock presence. macOS-only: the method
+            // does not exist on other platforms.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // --- resolve the built frontend dir ------------------------------
             // Desktop resolution is independent of the `CM_DIST` env override
             // (that is a browser-mode/`cm-serve` affordance), so the app behaves

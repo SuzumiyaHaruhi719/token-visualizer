@@ -12,7 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# `macos-private-api` enables transparent windows on macOS (the popover is a
+# frameless transparent floating card). It is a no-op on Windows, where the
+# acrylic popover already relied on `transparent(true)`. Pairs with
+# `"macOSPrivateApi": true` in tauri.conf.json. Note: apps using the private API
+# cannot ship on the Mac App Store — fine for this personal, source-built tool.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 cmcore = { path = "../crates/core", package = "claude-monitor-core" }
