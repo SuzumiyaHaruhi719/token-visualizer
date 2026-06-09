@@ -743,7 +743,7 @@ const DRAG_SAFETY_MS = 30_000;
  *  the reel's creep rAF so it isn't painting while DWM recomposites the acrylic
  *  every frame, and arms the end signals (mouseup/pointerup/blur + a long safety
  *  timeout so a swallowed end-event can never leave updates frozen). */
-function beginDrag(root: HTMLElement): void {
+function beginDrag(root: HTMLElement, kind: "move" | "resize" = "resize"): void {
   if (dragging) return;
   dragging = true;
   dragRoot = root;
@@ -763,13 +763,21 @@ function beginDrag(root: HTMLElement): void {
       window.removeEventListener("blur", end);
     }
     if (safety) window.clearTimeout(safety);
-    // The user just changed the WINDOW size by hand. Invalidate the auto-fit
-    // memo so the settle below is guaranteed to recompute + apply the fit: a
-    // RESIZE within the same tier can land on the exact `lastFitH` value, and
-    // without this reset `autoFitHeight` would early-return (its `< 2` no-op
-    // guard) and leave the window at the raw dragged size — dead space / a slight
-    // clip instead of hugging content (fix #5, post-drag case).
-    lastFitH = 0;
+    // Only a RESIZE drag changed the WINDOW size, so only then invalidate the
+    // auto-fit memo to force a recompute + re-fit: a resize within the same tier
+    // can land on the exact `lastFitH` value, and without this reset
+    // `autoFitHeight` would early-return (its `< 2` no-op guard) and leave the
+    // window at the raw dragged size — dead space / a slight clip instead of
+    // hugging content (fix #5, post-drag case).
+    //
+    // A MOVE drag does NOT change the size, so it must NOT re-fit: keeping
+    // `lastFitH` intact lets `autoFitHeight` no-op at the current height, so
+    // dragging the popover to a new position never grows it (previously the move
+    // settle reset the memo and snapped the height back to measured content,
+    // which on macOS over-measures and crept the window taller every drag).
+    if (kind === "resize") {
+      lastFitH = 0;
+    }
     // Settle ONCE: re-apply the tier/precision for the final box, then refresh
     // (re-fits the window height + resumes the reel). No per-frame work ran
     // during the drag, so this single pass is all the layout work there is.
@@ -814,7 +822,7 @@ function wireResize(root: HTMLElement): void {
   // no move) also runs begin→end harmlessly (one settle pass on release).
   root.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
-    beginDrag(root);
+    beginDrag(root, "move");
   });
 
   for (const handle of root.querySelectorAll<HTMLElement>(".pop-resize")) {
