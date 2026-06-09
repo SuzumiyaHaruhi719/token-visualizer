@@ -8,6 +8,9 @@ node_modules/
 dist/
 .vite/
 
+# README capture: raw frame folders (GIFs in assets/ are committed)
+.capframes/
+
 # Local data (SQLite)
 *.db
 *.db-wal

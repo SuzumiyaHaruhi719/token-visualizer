@@ -107,7 +107,9 @@ export function mockSummary(range: RangeKey = "today"): Summary {
     byModel: [
       { model: "claude-opus-4-8", tokens: 78_400_000, costUsd: 33.2 },
       { model: "claude-sonnet-4-6", tokens: 32_100_000, costUsd: 6.9 },
+      { model: "gpt-5.4-codex", tokens: 10_100_000, costUsd: 1.17 },
       { model: "claude-haiku-4-5", tokens: 8_000_000, costUsd: 0.97 },
+      { model: "deepseek-v4-pro", tokens: 6_400_000, costUsd: 0.42 },
     ],
     byProject: [
       { project: "claude-monitor", tokens: 54_300_000 },
@@ -119,6 +121,7 @@ export function mockSummary(range: RangeKey = "today"): Summary {
     bySource: [
       { source: "claude", tokens: 108_400_000, costUsd: 39.9 },
       { source: "codex", tokens: 10_100_000, costUsd: 1.17 },
+      { source: "deepseek", tokens: 6_400_000, costUsd: 0.42 },
     ],
     timeseries,
   };
@@ -157,22 +160,38 @@ export function mockSessions(): SessionState[] {
       state: { kind: "working", tool: "Edit" },
       tokens: 1_240_000,
       updatedAt: now - 1_500,
+      source: "claude",
+      lastUserMessage: "Add a by-source split bar to the dashboard",
     },
     {
-      sessionId: "sess-sonnet-2",
+      sessionId: "sess-codex-2",
       project: "CorePilot",
-      model: "claude-sonnet-4-6",
+      model: "gpt-5.4-codex",
       state: { kind: "thinking" },
-      tokens: 412_000,
+      tokens: 612_000,
       updatedAt: now - 4_000,
+      source: "codex",
+      lastUserMessage: "Refactor the fan-curve solver and add tests",
     },
     {
-      sessionId: "sess-haiku-3",
+      sessionId: "sess-deepseek-3",
       project: "8111Reader",
-      model: "claude-haiku-4-5",
+      model: "deepseek-v4-pro",
+      state: { kind: "responding" },
+      tokens: 188_000,
+      updatedAt: now - 9_000,
+      source: "deepseek",
+      lastUserMessage: "Translate the onboarding chapter to English",
+    },
+    {
+      sessionId: "sess-sonnet-4",
+      project: "gstack",
+      model: "claude-sonnet-4-6",
       state: { kind: "waiting" },
       tokens: 88_000,
-      updatedAt: now - 30_000,
+      updatedAt: now - 42_000,
+      source: "claude",
+      lastUserMessage: "Run the browser QA pass on the landing page",
     },
   ];
 }
